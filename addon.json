@@ -1,0 +1,6 @@
+{
+    "title": "Prop Curve Finder",
+    "type": "tool",
+    "tags": ["build"],
+    "ignore": ["tests/*", "*.md"]
+}
