@@ -9,7 +9,14 @@ A Garry's Mod tool gun mode for measuring a surface. Click a screen, a wall or a
 
 It can also put a test Star Trek Modules LCARS interface on it, to check the curve.
 
-Find it in the spawn menu under **Construction → Prop Curve Finder**.
+Find it in the spawn menu under **Construction → Prop Curve Finder**, or type `gmod_tool propcurvefinder` in the console.
+
+## Installing
+
+Put the repository in `garrysmod/addons/` so the path is `garrysmod/addons/propcurvefinder/lua/...`. Then change map or restart.
+- **Lowercase folder name:** on a Linux server, GMod requires addon folder names to be all lowercase, so name it `propcurvefinder`, not `PropCurveFinder`. Clone it with `git clone https://github.com/Fluffer-oss/PropCurveFinder propcurvefinder`.
+- **Downloaded as a zip:** make sure you don't end up with a folder inside a folder (`addons/PropCurveFinder-main/PropCurveFinder-main/lua`).
+- **Check it's loaded:** the console prints `[PropCurveFinder] loaded (server)` and `[PropCurveFinder] loaded (client)`.
 
 ## Using it
 

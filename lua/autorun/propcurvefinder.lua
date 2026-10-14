@@ -16,3 +16,6 @@ else
     include(BASE .. "cl_probe.lua")
     include(BASE .. "cl_display.lua")
 end
+
+-- So you can see in the console that the addon is installed and loaded.
+MsgN("[PropCurveFinder] loaded (" .. (SERVER and "server" or "client") .. "): tool gun > Construction > Prop Curve Finder, or 'gmod_tool propcurvefinder'")
