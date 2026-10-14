@@ -26,13 +26,29 @@ Put the repository in `garrysmod/addons/` so the path is `garrysmod/addons/propc
 | `propcurvefinder` | Primary fire | Probe the surface you're looking at. |
 | `propcurvefinder_clear` | Secondary fire | Clear the probe, and your test interface. |
 | `propcurvefinder_show` | Reload | Show the last result again. |
+| `propcurvefinder_materials` | | List the materials of the prop you're looking at. |
+| `propcurvefinder_material <path>` | | Measure that material on props, e.g. `propcurvefinder_material models/kingpommes/startrek/intrepid/lcars/lcars_bridge_mission_middle`. Empty (`propcurvefinder_material ""`) measures the material you're looking at. |
+
+### Props: measured from the model itself
+
+A trace against a prop hits its collision model, a simplified shape that can sit in front of what you see. A console's collision model is often a sheet in front of its screens. So on props and static props, the tool reads the model's own files instead:
+- `.mdl`: its materials and meshes;
+- `.vvd`: its vertices and normals;
+- `.dx90.vtx`: its triangles.
+
+Then it measures with the real triangles:
+1. Your aim is cast against the triangles, to find exactly which surface and material you're looking at, even behind glass.
+2. It takes that material (or the one named in `propcurvefinder_material`), only the piece connected to where you aimed.
+3. The curve is fitted to every corner of that piece with its own normals, so the radius, arc, width, height and edges are the material's exactly.
+
+The result says `Material = "..."` when it was measured this way, and the piece's triangles are drawn in light blue. If the model's files can't be read, or it doesn't use the material you named, it falls back to walking the surface with traces and says why.
 
 A probe:
 1. **Finds what you hit.**
    - An entity or prop: its class, model, position and angles.
    - A static prop: static props aren't entities, so a trace only says it hit the world. The tool reads the map's static prop list (model, position, angles) and each model's box to find which one. It reads the files only.
    - A world brush: its texture.
-2. **Walks along the surface** from where you clicked, to the right, left, up and down, until it reaches an edge. An edge is any of:
+2. **Walks along the surface** (world brushes; props are measured from the model, see below) from where you clicked, to the right, left, up and down, until it reaches an edge. An edge is any of:
    - the surface ends;
    - a different object;
    - a bend sharper than the limit (30° by default);
@@ -87,6 +103,7 @@ It's also shown in a window as a Lua table you can copy, and printed to the cons
 - `propcurvefinder_segments 8`: how many flat pieces a curved surface is split into.
 - `propcurvefinder_lift 0.25`: how far in front of the surface the pieces sit, so they don't flicker into it.
 - `propcurvefinder_texturestop 1`: on world brushes, stop at a texture change.
+- `propcurvefinder_material ""`: on props, the material to measure (empty: the one you're looking at).
 
 ## STM test interface
 
@@ -116,6 +133,7 @@ They check, against the true geometry:
 - that every piece sits on or in front of the surface and faces you, in order left to right;
 - the 3D2D angle conventions;
 - static prop and entity local coordinates;
+- props measured from real binary model files (`.mdl`, `.vvd` with fixups, `.vtx`): a curved console screen behind a collision sheet of glass, measured exactly, by the material you look at or name, only the connected piece;
 - the STM interface: windows on their pieces at the right size, button presses, admin-only, replacing and clearing;
 - the console commands and the weapon.
 

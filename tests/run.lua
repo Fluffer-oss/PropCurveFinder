@@ -15,6 +15,7 @@ local function near(a, b, tol) return a ~= nil and b ~= nil and math.abs(a - b) 
 local function vnear(v, w, tol) return v and w and (v - w):Length() <= (tol or 1e-3) end
 
 M.convars = {
+    propcurvefinder_material = "",
     propcurvefinder_step = 2, propcurvefinder_maxdistance = 512, propcurvefinder_maxbend = 30,
     propcurvefinder_segments = 8, propcurvefinder_texturestop = 1, propcurvefinder_lift = 0.25
 }
@@ -148,8 +149,87 @@ step("a flat static prop panel: local coordinates", function()
     check(loadstring("return " .. text:gsub("^%-%-[^\n]*\n", "")) ~= nil, "the output is valid Lua")
 end)
 
+step("a console's screen material: measured from the model's own triangles", function()
+    -- A static prop console turned 30 degrees. Its screen material is a concave
+    -- strip, radius 80 around the prop's z axis, -30..30 degrees around its +x,
+    -- z -20..25. A frame material carries on from 30 to 45 degrees, and a
+    -- separate piece of the screen material sits at -60..-45. The collision
+    -- model is a flat sheet of glass 10 units in front: that's all traces hit.
+    local propPos, propAng = V(2000, 500, 100), A(0, 30, 0)
+    local function Strip(texture, a1, a2)
+        local verts, tris = {}, {}
+        local columns = math.floor((a2 - a1) / 5 + 0.5)
+        for c = 0, columns do
+            local t = math.rad(a1 + (a2 - a1) * c / columns)
+            for _, z in ipairs({ -20, 25 }) do
+                local radial = V(math.cos(t), math.sin(t), 0)
+                table.insert(verts, { pos = radial * 80 + V(0, 0, z), normal = -radial })
+            end
+        end
+        for c = 0, columns - 1 do
+            local i = c * 2 + 1
+            table.insert(tris, { i, i + 2, i + 1 })
+            table.insert(tris, { i + 1, i + 2, i + 3 })
+        end
+        return { texture = texture, verts = verts, tris = tris }
+    end
+    local meshes = { Strip("screen_middle", -30, 30), Strip("frame", 30, 45), Strip("screen_middle", -60, -45) }
+    local mdl, vvd, vtx = M.ModelFiles(meshes, "models\\kingpommes\\test\\", V(-10, -100, -30), V(100, 100, 30), true)
+    M.files["models/test/console.mdl"], M.files["models/test/console.vvd"], M.files["models/test/console.dx90.vtx"] = mdl, vvd, vtx
+    M.existingMaterials["models/kingpommes/test/screen_middle"] = true
+    M.existingMaterials["models/kingpommes/test/frame"] = true
+    M.files["maps/rp_test.bsp"] = M.MapWithStaticProps({ { model = "models/test/console.mdl", pos = propPos, ang = propAng } })
+    PCF.ReloadStaticProps()
+
+    local forward, left = propAng:Forward(), -propAng:Right()
+    local glass = M.Rect(propPos + forward * 70, forward, left, V(0, 0, 1), 60, 30)
+    glass.texture = "**studio**"
+    M.scene = { glass }
+
+    local mesh = PCF.ModelMesh("models/test/console.mdl", 0)
+    check(mesh and #mesh.triangles == (12 + 3 + 3) * 2, "the model's triangles read: " .. tostring(mesh and #mesh.triangles))
+    check(mesh and mesh.triangles[1].material == "models/kingpommes/test/screen_middle", "with their materials")
+    -- The right corners: the screen's triangles add up to its 12 flat strips of 45 x chord.
+    local area = 0
+    for _, tri in ipairs(mesh and mesh.triangles or {}) do
+        if tri.material == "models/kingpommes/test/screen_middle" then area = area + (tri.b - tri.a):Cross(tri.c - tri.a):Length() / 2 end
+    end
+    local strip = 45 * 2 * 80 * math.sin(math.rad(5) / 2)
+    check(near(area, strip * (12 + 3), 0.01), "triangles join the right corners: area " .. area .. ", want " .. strip * 15)
+
+    -- Aim at the screen through the glass, a little off center.
+    local eye = propPos + V(0, 0, 5)
+    local aim = propPos + (forward * math.cos(math.rad(10)) + left * math.sin(math.rad(10))) * 80 + V(0, 0, 5)
+    local r = ProbeAt(eye, aim)
+    check(r.source == "model", "measured from the model, not traces: " .. tostring(r.source) .. " " .. tostring(r.meshNote))
+    check(r.material == "models/kingpommes/test/screen_middle", "the material under the crosshair")
+    check(near(math.sqrt((r.hit.pos.x - propPos.x) ^ 2 + (r.hit.pos.y - propPos.y) ^ 2), 80, 0.3),
+        "hit on the screen itself, not the glass in front of it")
+    check(r.shape == "cylinder" and near(r.radius, 80, 0.01), "radius exactly 80: " .. tostring(r.radius))
+    check(r.concave == true, "concave")
+    check(near(r.arcDegrees, 60, 0.01), "exactly the screen material's 60 degrees (not the frame, not the other piece): " .. tostring(r.arcDegrees))
+    check(near(r.height, 45, 1e-3), "exactly its 45 height: " .. tostring(r.height))
+    check(vnear(r.ToLocal(r.center), V(0, 0, r.ToLocal(r.center).z), 1e-3), "its axis through the prop's origin")
+    check(vnear(r.ToLocal(r.frame.pos), V(80, 0, 2.5), 1e-3), "the screen's middle in the prop's coordinates")
+    check(#r.segments == 8 and near(r.segments[1].width, 2 * 80 * math.sin(math.rad(60) / 16), 1e-6), "8 chord pieces across it")
+    for i, seg in ipairs(r.segments) do Check3D2D(seg, "piece " .. i) end
+    check(PCF.FormatResult(r):find("Material = \"models/kingpommes/test/screen_middle\"", 1, true) ~= nil, "material in the output")
+
+    -- Pick a material by name: the frame.
+    M.convars.propcurvefinder_material = "models/kingpommes/test/frame"
+    r = ProbeAt(eye, aim)
+    M.convars.propcurvefinder_material = ""
+    check(r.material == "models/kingpommes/test/frame" and near(r.arcDegrees, 15, 0.01), "the frame by name: 15 degrees")
+
+    -- A material the model doesn't have: back to traces, and says why.
+    M.convars.propcurvefinder_material = "models/kingpommes/test/nope"
+    r = ProbeAt(eye, aim)
+    M.convars.propcurvefinder_material = ""
+    check(r.source == "traces" and r.meshNote:find("doesn't use", 1, true), "unknown material: traces, with the reason")
+end)
+
 step("an entity: local coordinates follow its angles", function()
-    local ent = M.MakeEntity("prop_physics", V(0, 0, 0), A(0, 90, 0), { model = "models/props/screen.mdl" })
+    local ent = M.MakeEntity("prop_physics", V(0, 0, 0), A(0, 90, 0), { model = "models/props/screen.mdl", GetSkin = function() return 0 end })
     local face = M.Rect(V(0, 10, 0), V(0, 1, 0), V(1, 0, 0), V(0, 0, 1), 20, 10)
     face.entity = ent
     M.scene = { face }

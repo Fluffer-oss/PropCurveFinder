@@ -41,6 +41,11 @@ function PCF.FormatResult(result)
     pair(2, "Normal", Vec(result.hit.normal), L and Vec(result.ToLocalDir(result.hit.normal)))
     line(1, "},")
 
+    if result.source == "model" then
+        line(1, "Material = \"" .. result.material .. "\", -- measured from the model's own triangles")
+    elseif result.meshNote then
+        line(1, "-- Measured with traces (" .. result.meshNote .. ").")
+    end
     line(1, "Shape = \"" .. result.shape .. "\", -- fit error " .. N(result.residual or 0) .. " units (rms)")
     if result.radius then line(1, "Radius = " .. N(result.radius) .. ",") end
     if result.concave ~= nil then line(1, "Concave = " .. tostring(result.concave) .. ", -- curves towards you") end
@@ -93,6 +98,10 @@ hook.Add("PostDrawTranslucentRenderables", "PropCurveFinder.Overlay", function(d
     if depth or skybox or not result then return end
 
     render.SetColorMaterial()
+    for i, tri in ipairs(result.triangles or {}) do
+        if i > 4000 then break end
+        for k = 1, 3 do render.DrawLine(tri[k], tri[k % 3 + 1], Color(0, 200, 255), false) end
+    end
     for _, p in ipairs(result.points) do
         render.DrawLine(p, p + result.hit.normal * 1, Color(255, 255, 0), false)
     end
@@ -209,6 +218,18 @@ end
 concommand.Add("propcurvefinder", function() PCF.ProbeLook() end, nil, "Probe the surface you're looking at")
 concommand.Add("propcurvefinder_clear", function() PCF.Clear() end, nil, "Clear the probe and your test interface")
 concommand.Add("propcurvefinder_show", function() PCF.Reopen() end, nil, "Show the last result again")
+concommand.Add("propcurvefinder_materials", function()
+    local ply = LocalPlayer()
+    local target = PCF.IdentifyTarget(ply:GetEyeTrace())
+    local mesh = target.model and PCF.ModelMesh(target.model, target.skin)
+    if not mesh then
+        print("[PropCurveFinder] Look at a prop (its model files must be readable).")
+        return
+    end
+    print("[PropCurveFinder] " .. target.model .. " uses:")
+    for _, name in ipairs(PCF.ModelMaterials(mesh)) do print("    " .. name) end
+    print("Pick one with: propcurvefinder_material <name>   (or propcurvefinder_material \"\" for the one you look at)")
+end, nil, "List the materials of the prop you're looking at")
 
 -- From the weapon (in singleplayer, weapons only run on the server).
 net.Receive("PropCurveFinder.Probe", function() PCF.ProbeLook() end)

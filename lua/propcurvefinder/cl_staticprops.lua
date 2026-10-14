@@ -88,6 +88,7 @@ function PCF.StaticProps()
                     if model then
                         table.insert(staticProps, {
                             index = n,
+                            skin = size >= 36 and I32(sprp, at2 + 32) or 0,
                             model = model,
                             pos = Vector(F32(sprp, at2), F32(sprp, at2 + 4), F32(sprp, at2 + 8)),
                             ang = Angle(F32(sprp, at2 + 12), F32(sprp, at2 + 16), F32(sprp, at2 + 20))
@@ -99,6 +100,12 @@ function PCF.StaticProps()
     end
     f:Close()
     return staticProps
+end
+
+-- Forgets what was read, so it's read again (after the map's files change).
+function PCF.ReloadStaticProps()
+    staticProps = nil
+    boundsCache = {}
 end
 
 -- Whether a world position is inside a static prop's bounding box (plus `pad`).

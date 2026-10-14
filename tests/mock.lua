@@ -5,6 +5,7 @@ local M = {}
 local ADDON_LUA = HARNESS_DIR .. "../lua/"
 
 function math.Clamp(v, lo, hi) return math.min(math.max(v, lo), hi) end
+function string.Trim(s) return (tostring(s):gsub("^%s+", ""):gsub("%s+$", "")) end
 
 ---------------------------------------------------------------- Vector
 local VEC = {}
@@ -91,11 +92,11 @@ local function Trace(data)
         if t and t >= 0 and t <= length and (not bestT or t < bestT) then best, bestT, bestN = surface, t, n end
     end
     if not best then
-        return { Hit = false, HitPos = stop, HitNormal = Vector(0, 0, 0), Fraction = 1, HitWorld = false, StartSolid = false }
+        return { Hit = false, StartPos = start, HitPos = stop, HitNormal = Vector(0, 0, 0), Fraction = 1, HitWorld = false, StartSolid = false }
     end
     if bestN:Dot(dir) > 0 then bestN = -bestN end -- facing the ray, as Source reports it
     return {
-        Hit = true, HitPos = start + dir * bestT, HitNormal = bestN, Fraction = bestT / length,
+        Hit = true, StartPos = start, HitPos = start + dir * bestT, HitNormal = bestN, Fraction = bestT / length,
         Entity = best.entity or M.world, HitWorld = best.entity == nil, HitTexture = best.texture or "maps/wall",
         StartSolid = false, HitSky = false
     }
@@ -163,6 +164,7 @@ end
 
 ---------------------------------------------------------------- Realms
 M.files = {}
+M.existingMaterials = {}
 M.convars = {}
 M.time = 100
 
@@ -221,25 +223,33 @@ function M.NewRealm(isServer, localPlayer)
         return {
             Read = function(_, n) local chunk = data:sub(pos + 1, pos + n) pos = pos + #chunk return chunk end,
             Seek = function(_, p) pos = p end,
+            Size = function() return #data end,
             Close = function() end
         }
     end }
     env.GetConVar = function(name)
         if M.convars[name] == nil then return nil end
-        return { GetFloat = function() return M.convars[name] end, GetBool = function() return M.convars[name] ~= 0 end }
+        return {
+            GetFloat = function() return tonumber(M.convars[name]) or 0 end,
+            GetBool = function() return (tonumber(M.convars[name]) or 0) ~= 0 end,
+            GetString = function() return tostring(M.convars[name]) end
+        }
     end
     env.CreateConVar = function(name, default)
         M.convars[name] = M.convars[name] or tonumber(default)
         return env.GetConVar(name)
     end
     env.LocalPlayer = function() return localPlayer end
+    env.Material = function(name)
+        return { IsError = function() return not M.existingMaterials[name] end }
+    end
     env.MsgN = function(...) env.printed = table.concat({ ... }) end
     env.print = function(...) env.lastPrint = table.concat({ ... }, " ") end
     env.commands = {}
     env.concommand = { Add = function(name, fn) env.commands[name] = fn end }
     env.CreateClientConVar = function(name, default)
         assert(not isServer, "client convars are created on the client")
-        if M.convars[name] == nil then M.convars[name] = tonumber(default) end
+        if M.convars[name] == nil then M.convars[name] = tonumber(default) or default end
         env.clientConVars = env.clientConVars or {}
         env.clientConVars[name] = default
         return env.GetConVar(name)
@@ -334,6 +344,86 @@ function M.MapWithStaticProps(props)
         dir[#dir + 1] = i == 35 and (I32(headerSize) .. I32(#gameLump) .. I32(0) .. "\0\0\0\0") or string.rep("\0", 16)
     end
     return "VBSP" .. I32(20) .. table.concat(dir) .. gameLump .. sprpBytes
+end
+
+-- A model's three files (.mdl, .vvd, .dx90.vtx) from meshes:
+-- { texture = "name", verts = { { pos = Vector, normal = Vector }, ... }, tris = { {1, 2, 3}, ... } }.
+-- Textures live under `folder`. `fixups` writes the vertices through a fixup table.
+function M.ModelFiles(meshes, folder, mins, maxs, fixups)
+    local function V3(v) return F32(v.x) .. F32(v.y) .. F32(v.z) end
+
+    -- .mdl
+    local HEADER = 408
+    local textureAt = HEADER
+    local folderAt = textureAt + #meshes * 64
+    local skinAt = folderAt + 4
+    local partAt = skinAt + #meshes * 2
+    local modelAt = partAt + 16
+    local meshAt = modelAt + 148
+    local stringsAt = meshAt + #meshes * 116
+    local strings, stringPos = {}, stringsAt
+    local function S(text) local at = stringPos strings[#strings + 1] = text .. "\0" stringPos = stringPos + #text + 1 return at end
+    local textures = {}
+    for i, mesh in ipairs(meshes) do textures[i] = Pad(I32(S(mesh.texture) - (textureAt + (i - 1) * 64)), 64) end
+    local folderOffsets = I32(S(folder))
+    local skins = {}
+    for i = 1, #meshes do skins[i] = U16(i - 1) end
+    local totalVerts = 0
+    local meshStructs = {}
+    for i, mesh in ipairs(meshes) do
+        meshStructs[i] = Pad(I32(i - 1) .. I32(modelAt - (meshAt + (i - 1) * 116)) .. I32(#mesh.verts) .. I32(totalVerts), 116)
+        totalVerts = totalVerts + #mesh.verts
+    end
+    local header = Pad("IDST" .. I32(48), 128) .. V3(mins) .. V3(maxs)
+    header = Pad(header, 204) .. I32(#meshes) .. I32(textureAt) .. I32(1) .. I32(folderAt) .. I32(#meshes) .. I32(1) .. I32(skinAt) .. I32(1) .. I32(partAt)
+    local mdl = Pad(header, HEADER) .. table.concat(textures) .. folderOffsets .. table.concat(skins)
+        .. I32(0) .. I32(1) .. I32(0) .. I32(modelAt - partAt)
+        .. Pad(string.rep("\0", 72) .. I32(#meshes) .. I32(meshAt - modelAt) .. I32(totalVerts) .. I32(0), 148)
+        .. table.concat(meshStructs) .. table.concat(strings)
+
+    -- .vvd
+    local vertexBytes = {}
+    for _, mesh in ipairs(meshes) do
+        for _, v in ipairs(mesh.verts) do
+            vertexBytes[#vertexBytes + 1] = string.rep("\0", 16) .. V3(v.pos) .. V3(v.normal) .. string.rep("\0", 8)
+        end
+    end
+    local fixupBytes = fixups and (I32(0) .. I32(0) .. I32(totalVerts)) or ""
+    local vvdHeader = "IDSV" .. I32(4) .. I32(0) .. I32(1) .. I32(totalVerts) .. string.rep("\0", 28)
+        .. I32(fixups and 1 or 0) .. I32(64) .. I32(64 + #fixupBytes) .. I32(0)
+    local vvd = vvdHeader .. fixupBytes .. table.concat(vertexBytes)
+
+    -- .vtx: one strip group per mesh, its vertices listed rotated by 3 so the
+    -- index -> vertex -> original vertex id indirection is exercised.
+    local meshHeadersAt = 64
+    local groupsAt = meshHeadersAt + #meshes * 9
+    local blocksAt = groupsAt + #meshes * 25
+    local meshHeaders, groups, blocks = {}, {}, {}
+    local blockPos = blocksAt
+    for i, mesh in ipairs(meshes) do
+        local groupAbs = groupsAt + (i - 1) * 25
+        meshHeaders[i] = I32(1) .. I32(groupAbs - (meshHeadersAt + (i - 1) * 9)) .. "\0"
+        local n = #mesh.verts
+        local verts = {}
+        for k = 0, n - 1 do verts[#verts + 1] = "\0\0\0\1" .. U16((k + 3) % n) .. "\0\0\0" end
+        local indices = {}
+        for _, t in ipairs(mesh.tris) do
+            for c = 1, 3 do indices[#indices + 1] = U16((t[c] - 1 - 3) % n) end
+        end
+        local vertsAt = blockPos
+        local indexAt = vertsAt + n * 9
+        local stripAt = indexAt + #indices * 2
+        local strip = I32(#indices) .. I32(0) .. I32(n) .. I32(0) .. U16(0) .. "\1" .. I32(0) .. I32(0)
+        blocks[#blocks + 1] = table.concat(verts) .. table.concat(indices) .. strip
+        blockPos = stripAt + 27
+        groups[i] = I32(n) .. I32(vertsAt - groupAbs) .. I32(#indices) .. I32(indexAt - groupAbs) .. I32(1) .. I32(stripAt - groupAbs) .. "\0"
+    end
+    local vtx = I32(7) .. I32(24) .. U16(53) .. U16(9) .. I32(3) .. I32(0) .. I32(1) .. I32(0) .. I32(1) .. I32(36)
+        .. I32(1) .. I32(8)                                 -- body part @36: 1 model, at +8
+        .. I32(1) .. I32(8)                                 -- model @44: 1 LOD, at +8
+        .. I32(#meshes) .. I32(12) .. F32(0)                -- LOD @52: meshes at +12
+        .. table.concat(meshHeaders) .. table.concat(groups) .. table.concat(blocks)
+    return mdl, vvd, vtx
 end
 
 -- A model header with view box mins/maxs.

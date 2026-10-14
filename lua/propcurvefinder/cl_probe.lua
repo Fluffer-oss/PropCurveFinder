@@ -13,7 +13,8 @@ local DEFAULTS = {
     maxbend = { "30", "A sharper bend than this (degrees) is an edge" },
     segments = { "8", "Flat pieces to split a curved surface into" },
     texturestop = { "1", "On world brushes, a different texture is an edge" },
-    lift = { "0.25", "How far in front of the surface the pieces sit" }
+    lift = { "0.25", "How far in front of the surface the pieces sit" },
+    material = { "", "On a prop, measure this material (empty: the one you're looking at)" }
 }
 for name, def in pairs(DEFAULTS) do
     CreateClientConVar("propcurvefinder_" .. name, def[1], true, false, def[2])
@@ -25,6 +26,11 @@ local function Setting(name, default)
 end
 PCF.Setting = Setting
 
+local function SettingString(name)
+    local cvar = GetConVar("propcurvefinder_" .. name)
+    return cvar and string.Trim(cvar:GetString() or "") or ""
+end
+
 local function Trace(from, to)
     return util.TraceLine({ start = from, endpos = to, filter = LocalPlayer() })
 end
@@ -34,7 +40,7 @@ function PCF.IdentifyTarget(tr)
     local ent = tr.Entity
     if IsValid(ent) and not ent:IsWorld() then
         return {
-            type = "entity", ent = ent, class = ent:GetClass(), model = ent:GetModel(),
+            type = "entity", ent = ent, class = ent:GetClass(), model = ent:GetModel(), skin = ent:GetSkin(),
             pos = ent:GetPos(), ang = ent:GetAngles(),
             Same = function(other) return other.Entity == ent end
         }
@@ -44,7 +50,7 @@ function PCF.IdentifyTarget(tr)
         local prop = PCF.FindStaticProp(tr.HitPos)
         if prop then
             return {
-                type = "static_prop", index = prop.index, model = prop.model, pos = prop.pos, ang = prop.ang,
+                type = "static_prop", index = prop.index, model = prop.model, skin = prop.skin, pos = prop.pos, ang = prop.ang,
                 Same = function(other)
                     return other.HitWorld and other.HitTexture == "**studio**" and PCF.InStaticProp(prop, other.HitPos, 2)
                 end
@@ -109,26 +115,104 @@ local function HitBasis(normal, eyeForward)
     return up, Unit(up:Cross(normal))
 end
 
+-- On a prop or entity: its real surface, from the model's own triangles (a
+-- trace only hits its collision model, which can sit in front of what you see).
+-- The material is propcurvefinder_material, or the one under the crosshair; the
+-- samples are every corner of that material's piece, with its normals.
+-- Returns nil and a reason when it can't be done.
+function PCF.MeshSamples(target, tr)
+    if not (target.model and target.pos and target.ang) then return nil end
+    local mesh = PCF.ModelMesh(target.model, target.skin)
+    if not mesh then return nil, "couldn't read the model's files" end
+
+    local zero = Angle(0, 0, 0)
+    local function ToWorld(v) return (LocalToWorld(v, zero, target.pos, target.ang)) end
+    local function ToWorldDir(v) return (LocalToWorld(v, zero, Vector(0, 0, 0), target.ang)):GetNormalized() end
+    local origin, dir = tr.StartPos, (tr.HitPos - tr.StartPos):GetNormalized()
+    local localOrigin = WorldToLocal(origin, zero, target.pos, target.ang)
+    local localDir = WorldToLocal(dir, zero, Vector(0, 0, 0), target.ang)
+    local hitIndex, hitT = PCF.RayMesh(mesh, localOrigin, localDir)
+
+    local material = SettingString("material")
+    material = material ~= "" and PCF.NormalizePath(material) or (hitIndex and mesh.triangles[hitIndex].material)
+    if not material then return nil, "the crosshair isn't on the model" end
+    local piece = PCF.MaterialPiece(mesh, material, hitIndex)
+    if #piece == 0 then return nil, "the model doesn't use " .. material end
+
+    local samples = { material = material, points = {}, normals = {}, triangles = {}, materials = PCF.ModelMaterials(mesh) }
+    if hitIndex and mesh.triangles[hitIndex].material == material then
+        local tri = mesh.triangles[hitIndex]
+        samples.hitPos = ToWorld(localOrigin + localDir * hitT)
+        samples.hitNormal = ToWorldDir((tri.b - tri.a):Cross(tri.c - tri.a))
+    end
+
+    local seen = {}
+    for _, i in ipairs(piece) do
+        local tri = mesh.triangles[i]
+        local corners = {}
+        for _, corner in ipairs({ { tri.a, tri.na }, { tri.b, tri.nb }, { tri.c, tri.nc } }) do
+            local world = ToWorld(corner[1])
+            corners[#corners + 1] = world
+            local key = string.format("%.2f %.2f %.2f", world.x, world.y, world.z)
+            if not seen[key] then
+                seen[key] = true
+                table.insert(samples.points, world)
+                table.insert(samples.normals, ToWorldDir(corner[2]))
+            end
+        end
+        table.insert(samples.triangles, corners)
+    end
+
+    if not samples.hitPos then
+        -- Aimed elsewhere: start from the corner of the piece nearest the crosshair.
+        local best
+        for k, p in ipairs(samples.points) do
+            if not best or p:DistToSqr(tr.HitPos) < samples.points[best]:DistToSqr(tr.HitPos) then best = k end
+        end
+        samples.hitPos, samples.hitNormal = samples.points[best], samples.normals[best]
+    end
+    -- Normals facing you.
+    if samples.hitNormal:Dot(origin - samples.hitPos) < 0 then samples.hitNormal = -samples.hitNormal end
+    for k, n in ipairs(samples.normals) do
+        if n:Dot(samples.hitNormal) < 0 then samples.normals[k] = -n end
+    end
+    return samples
+end
+
 -- Probes the surface a trace hit. Returns a result table (see README).
 function PCF.Probe(tr, eyeForward)
     local target = PCF.IdentifyTarget(tr)
     local p0, n0 = tr.HitPos, tr.HitNormal
-    local up0, right0 = HitBasis(n0, eyeForward)
 
-    local result = { target = target, hit = { pos = p0, normal = n0, texture = tr.HitTexture }, edges = {} }
-    local points, normals = { p0 }, { n0 }
-    local paths = {}
-    for name, dir in pairs({ right = right0, left = -right0, up = up0, down = -up0 }) do
-        local path, reason = PCF.March(target, p0, n0, dir)
-        paths[name] = path
-        result.edges[name] = reason
-        for _, sample in ipairs(path) do
-            table.insert(points, sample.pos)
-            table.insert(normals, sample.normal)
+    local result = { target = target, hit = { pos = p0, normal = n0, texture = tr.HitTexture }, edges = {}, paths = {} }
+    local points, normals
+    local samples, why = PCF.MeshSamples(target, tr)
+    if samples then
+        -- Measured from the model's own triangles.
+        p0, n0 = samples.hitPos, samples.hitNormal
+        result.hit.pos, result.hit.normal = p0, n0
+        result.material, result.materials, result.triangles = samples.material, samples.materials, samples.triangles
+        result.source = "model"
+        points, normals = samples.points, samples.normals
+        for _, side in ipairs({ "left", "right", "up", "down" }) do result.edges[side] = "the edge of the material" end
+    else
+        -- Measured by walking along the surface with traces.
+        result.source = "traces"
+        result.meshNote = why
+        local up0, right0 = HitBasis(n0, eyeForward)
+        points, normals = { p0 }, { n0 }
+        for name, dir in pairs({ right = right0, left = -right0, up = up0, down = -up0 }) do
+            local path, reason = PCF.March(target, p0, n0, dir)
+            result.paths[name] = path
+            result.edges[name] = reason
+            for _, sample in ipairs(path) do
+                table.insert(points, sample.pos)
+                table.insert(normals, sample.normal)
+            end
         end
     end
+    local up0 = HitBasis(n0, eyeForward)
     result.points = points
-    result.paths = paths
 
     local fit = Mth.FitSurface(points, normals, n0)
     result.fit = fit
