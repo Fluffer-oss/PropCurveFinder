@@ -27,7 +27,8 @@ local function RegisterInterface()
     setmetatable(interface, { __index = lcars.Interfaces.base })
 
     -- curve: in the entity's own coordinates.
-    function interface:Open(ent, curve)
+    function interface:Open(ent, curve, piece, pieceCount)
+        piece, pieceCount = piece or 1, pieceCount or 1
         local Curve = PCF.Curve
         local width, height = Curve.Size(curve)
         -- Enough pixels for STM's frame and buttons, without a huge render target.
@@ -41,7 +42,7 @@ local function RegisterInterface()
         local localPos, localAng = WorldToLocal(pos, right:AngleEx(normal), ent:GetPos(), ent:GetAngles())
 
         local ok, window = lcars:CreateWindow("button_matrix", localPos, localAng, scale, widthPx, heightPx,
-            function() end, "PROPCURVEFINDER TEST", "PCF", false)
+            function() end, pieceCount > 1 and ("PROPCURVEFINDER TEST " .. piece .. "/" .. pieceCount) or "PROPCURVEFINDER TEST", "PCF" .. piece, false)
         if not ok then return false, window end
 
         local rows = math.Clamp(math.floor((heightPx - 120) / 40), 1, 10)
@@ -51,7 +52,8 @@ local function RegisterInterface()
             for c = 1, columns do
                 window:AddButtonToRow(row, "R" .. r .. " C" .. c, nil, nil, nil, false, false, function(ply)
                     if IsValid(ply) then
-                        ply:ChatPrint(string.format("[PropCurveFinder] row %d, column %d (of %d x %d)", r, c, rows, columns))
+                        ply:ChatPrint(string.format("[PropCurveFinder] %srow %d, column %d (of %d x %d)",
+                            pieceCount > 1 and ("interface " .. piece .. " of " .. pieceCount .. ": ") or "", r, c, rows, columns))
                     end
                 end)
             end
@@ -85,33 +87,41 @@ net.Receive("PropCurveFinder.TestInterface", function(_, ply)
     lastRequest[ply] = CurTime()
 
     local target = net.ReadEntity()
-    local curve = PCF.Curve.Read()
-    if not PCF.Curve.Valid(curve) then return Reply("That surface is the wrong size for an interface.") end
-    local middle = PCF.Curve.Point(curve, 0.5, 0.5)
-    if middle:Distance(ply:GetPos()) > 4096 then return Reply("That surface is too far away.") end
+    local curves = {}
+    for i = 1, net.ReadUInt(4) do
+        local curve = PCF.Curve.Read()
+        if not PCF.Curve.Valid(curve) then return Reply("Surface " .. i .. " is the wrong size for an interface.") end
+        if PCF.Curve.Point(curve, 0.5, 0.5):Distance(ply:GetPos()) > 4096 then return Reply("That surface is too far away.") end
+        curves[i] = curve
+    end
+    if #curves == 0 then return end
 
     if not RegisterInterface() then return Reply("Star Trek Modules' LCARS isn't loaded.") end
 
-    -- An invisible anchor for the interface, on the moving prop if it's one.
+    -- One interface per surface, each on an invisible anchor (STM interfaces
+    -- belong to an entity), on the moving prop if it's one.
     PCF.ClearTestInterface(ply)
-    local anchor = ents.Create("propcurvefinder_anchor")
-    anchor:SetPos(middle)
-    anchor:SetAngles(Angle(0, 0, 0))
-    anchor:Spawn()
-    if IsValid(target) then anchor:SetParent(target) end
-    anchor.LCARSKeyData = { lcars_never_close = true }
-    ply.PropCurveFinderAnchor = anchor
+    ply.PropCurveFinderAnchors = {}
+    for i, curve in ipairs(curves) do
+        local anchor = ents.Create("propcurvefinder_anchor")
+        anchor:SetPos(PCF.Curve.Point(curve, 0.5, 0.5))
+        anchor:SetAngles(Angle(0, 0, 0))
+        anchor:Spawn()
+        if IsValid(target) then anchor:SetParent(target) end
+        anchor.LCARSKeyData = { lcars_never_close = true }
+        table.insert(ply.PropCurveFinderAnchors, anchor)
 
-    local localCurve = PCF.Curve.ToLocal(curve, anchor:GetPos(), anchor:GetAngles())
-    PCF.CurvedAnchors[anchor] = localCurve
-    SendCurve(anchor, localCurve)
+        local localCurve = PCF.Curve.ToLocal(curve, anchor:GetPos(), anchor:GetAngles())
+        PCF.CurvedAnchors[anchor] = localCurve
+        SendCurve(anchor, localCurve)
 
-    local ok, err = Star_Trek.LCARS:OpenInterface(ply, anchor, INTERFACE_NAME, localCurve)
-    if not ok then
-        PCF.ClearTestInterface(ply)
-        return Reply("Couldn't open the interface: " .. tostring(err))
+        local ok, err = Star_Trek.LCARS:OpenInterface(ply, anchor, INTERFACE_NAME, localCurve, i, #curves)
+        if not ok then
+            PCF.ClearTestInterface(ply)
+            return Reply("Couldn't open interface " .. i .. ": " .. tostring(err))
+        end
     end
-    Reply("Test interface placed. Clear it with propcurvefinder_clear (or the weapon's secondary fire).")
+    Reply(string.format("%d test interface%s placed. Clear with propcurvefinder_clear (or the weapon's secondary fire).", #curves, #curves == 1 and "" or "s"))
 end)
 
 -- Late joiners get the curves of the interfaces already up.
@@ -122,10 +132,11 @@ net.Receive("PropCurveFinder.CurvedSync", function(_, ply)
 end)
 
 function PCF.ClearTestInterface(ply)
-    local anchor = ply.PropCurveFinderAnchor
-    if anchor then PCF.CurvedAnchors[anchor] = nil end
-    if IsValid(anchor) then anchor:Remove() end
-    ply.PropCurveFinderAnchor = nil
+    for _, anchor in ipairs(ply.PropCurveFinderAnchors or {}) do
+        PCF.CurvedAnchors[anchor] = nil
+        if IsValid(anchor) then anchor:Remove() end
+    end
+    ply.PropCurveFinderAnchors = nil
 end
 
 hook.Add("PlayerDisconnected", "PropCurveFinder.Anchor", PCF.ClearTestInterface)

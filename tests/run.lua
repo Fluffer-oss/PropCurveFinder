@@ -45,6 +45,27 @@ local function Check3D2D(seg, label)
     check(vnear(ang:Right(), -seg.up, 1e-6), label .. ": angle's Right points down the piece (3D2D y goes down)")
 end
 
+-- A fake STM: windows are recorded; button_matrix windows take rows of buttons.
+local function FakeSTM(windows)
+    return { LCARS = {
+        Interfaces = { base = { Close = function() end } },
+        CreateWindow = function(self, kind, pos, ang, scale, width, height, callback, title)
+            local w = { kind = kind, pos = pos, ang = ang, scale = scale, width = width, height = height, title = title, rows = {} }
+            function w:CreateMainButtonRow(rowHeight) local row = { height = rowHeight, buttons = {} } table.insert(self.rows, row) return row end
+            function w:AddButtonToRow(row, name, number, color, active, disabled, toggle, cb)
+                local button = { name = name, callback = cb }
+                table.insert(row.buttons, button)
+                return button
+            end
+            table.insert(windows, w)
+            return true, w
+        end,
+        OpenInterface = function(self, ply, ent, name, ...)
+            return setmetatable({}, { __index = self.Interfaces[name] }):Open(ent, ...)
+        end
+    } }
+end
+
 step("eigen decomposition", function()
     local values, vectors = PCF.Math.Eigen({ { 2, 1, 0 }, { 1, 2, 0 }, { 0, 0, 5 } })
     check(near(values[1], 1, 1e-9) and near(values[2], 3, 1e-9) and near(values[3], 5, 1e-9), "eigenvalues 1, 3, 5")
@@ -229,6 +250,115 @@ step("a console's screen material: measured from the model's own triangles", fun
     check(r.source == "traces" and r.meshNote:find("doesn't use", 1, true), "unknown material: traces, with the reason")
 end)
 
+step("a material in separate pieces: each measured, exported and given its own interface", function()
+    -- A lower console panel: one material in three curved pieces with gaps
+    -- between (-50..-20, -15..15, 20..50 degrees), radius 80, z -30..-10, plus a
+    -- sliver too small to count.
+    local propPos, propAng = V(-3000, 0, 0), A(0, 0, 0)
+    local function Strip(texture, a1, a2, z1, z2)
+        local verts, tris = {}, {}
+        local columns = math.max(1, math.floor((a2 - a1) / 5 + 0.5))
+        for c = 0, columns do
+            local t = math.rad(a1 + (a2 - a1) * c / columns)
+            for _, z in ipairs({ z1, z2 }) do
+                local radial = V(math.cos(t), math.sin(t), 0)
+                table.insert(verts, { pos = radial * 80 + V(0, 0, z), normal = -radial })
+            end
+        end
+        for c = 0, columns - 1 do
+            local i = c * 2 + 1
+            table.insert(tris, { i, i + 2, i + 1 })
+            table.insert(tris, { i + 1, i + 2, i + 3 })
+        end
+        return { texture = texture, verts = verts, tris = tris }
+    end
+    local meshes = {
+        Strip("lower", -15, 15, -30, -10), Strip("lower", 20, 50, -30, -10), Strip("lower", -50, -20, -30, -10),
+        Strip("lower", 60, 60.2, -30, -29.9) -- a sliver
+    }
+    local mdl, vvd, vtx = M.ModelFiles(meshes, "models/kingpommes/test/", V(-10, -100, -40), V(100, 100, 10), false)
+    M.files["models/test/lower.mdl"], M.files["models/test/lower.vvd"], M.files["models/test/lower.dx90.vtx"] = mdl, vvd, vtx
+    M.existingMaterials["models/kingpommes/test/lower"] = true
+    M.files["maps/rp_test.bsp"] = M.MapWithStaticProps({ { model = "models/test/lower.mdl", pos = propPos, ang = propAng } })
+    M.files["models/test/lower.mdl"] = mdl
+    PCF.ReloadStaticProps()
+    local glass = M.Rect(propPos + V(70, 0, -20), V(1, 0, 0), V(0, 1, 0), V(0, 0, 1), 60, 20)
+    glass.texture = "**studio**"
+    M.scene = { glass }
+
+    M.convars.propcurvefinder_material = "models/kingpommes/test/lower"
+    local eye = propPos + V(0, 0, -20)
+    local r = ProbeAt(eye, propPos + V(80, 5, -20)) -- aiming at the middle piece
+    M.convars.propcurvefinder_material = ""
+
+    check(r.pieces and #r.pieces == 3, "three pieces (the sliver dropped): " .. tostring(r.pieces and #r.pieces))
+    -- Looking down +x, left is +y: left to right is the 20..50 piece, then the middle, then -50..-20.
+    local expected = { { 20, 50 }, { -15, 15 }, { -50, -20 } }
+    for i, piece in ipairs(r.pieces or {}) do
+        local mid = piece.ToLocal(piece.frame.pos)
+        local angle = math.deg(math.atan2(mid.y, mid.x))
+        check(near(angle, (expected[i][1] + expected[i][2]) / 2, 0.01), "piece " .. i .. " in order, left to right: middle at " .. angle)
+        check(piece.shape == "cylinder" and near(piece.radius, 80, 0.01) and near(piece.arcDegrees, 30, 0.01) and near(piece.height, 20, 1e-3),
+            "piece " .. i .. " measured on its own: radius " .. tostring(piece.radius) .. ", " .. tostring(piece.arcDegrees) .. " degrees")
+        check(piece.index == i, "piece " .. i .. " numbered")
+    end
+    check(r.index == 2 and r.aimed, "the result is the one aimed at")
+
+    local text = PCF.FormatResult(r)
+    local _, count = text:gsub("{ %-%- piece %d", "")
+    check(count == 3 and text:find("Aimed = 2", 1, true) and text:find("Pieces = {", 1, true), "exported as three pieces")
+    check(text:find("TMin = ", 1, true) and text:find("E1 = { World", 1, true), "each with its exact curve")
+    local chunk = loadstring("return " .. text:gsub("^%-%-[^\n]*\n", ""))
+    check(chunk ~= nil, "the export is valid Lua")
+    if chunk then
+        local data = setfenv(chunk, { Vector = V, Angle = A })()
+        check(#data.Pieces == 3 and near(data.Pieces[1].Radius, 80, 0.01) and data.Pieces[3].Curve.Concave == true, "and reads back")
+    end
+
+    -- Three separate STM test interfaces.
+    local server = M.NewRealm(true)
+    local created, windows = {}, {}
+    server.ents = { Create = function(class) local e = M.MakeEntity(class, V(0, 0, 0)) table.insert(created, e) return e end }
+    server.Star_Trek = FakeSTM(windows)
+    server.include("autorun/propcurvefinder.lua")
+    client.Star_Trek = { LCARS = {} }
+    admin.pos = eye
+    M.time = M.time + 5
+    PCF.RequestTestInterface(r)
+    M.Pump(server, client)
+    check(#created == 3 and #windows == 3, "three interfaces, each on its own anchor: " .. #created .. ", " .. #windows)
+    for i, w in ipairs(windows) do
+        local piece = r.pieces[i]
+        check(near(w.width / w.scale, (80 - 0.25) * math.rad(30), 0.1), "interface " .. i .. " as wide as its piece")
+        local pos = M.LocalToWorld(w.pos, w.ang, created[i].pos, created[i].ang)
+        local u, v = PCF.Curve.Hit(piece.curve, eye, (pos - eye):GetNormalized())
+        check(u and near(u, 0.5, 1e-3) and near(v, 0.5, 1e-3), "interface " .. i .. " on its own piece")
+        check(w.title:find(i .. "/3", 1, true), "titled " .. i .. "/3: " .. w.title)
+    end
+    windows[2].rows[1].buttons[2].callback(admin)
+    check(admin.chat[#admin.chat]:find("interface 2 of 3: row 1, column 2", 1, true), "presses say which interface: " .. admin.chat[#admin.chat])
+    server.PropCurveFinder.ClearTestInterface(admin)
+    check(not created[1].__valid and not created[2].__valid and not created[3].__valid, "clearing removes all three")
+
+    -- Where's that static prop?
+    admin.eye, admin.look = eye, V(1, 0.05, 0):GetNormalized()
+    local prop, info = PCF.StaticPropInfo()
+    check(prop and prop.model == "models/test/lower.mdl" and info:find("Pos = Vector(-3000.000, 0.000, 0.000)", 1, true), "propcurvefinder_staticprop: " .. tostring(info))
+    check(client.clipboard == info, "and copies it")
+end)
+
+step("panels touching only at a corner are separate pieces", function()
+    local mesh = { triangles = {
+        { a = V(0, 0, 0), b = V(10, 0, 0), c = V(10, 10, 0), material = "m" },
+        { a = V(0, 0, 0), b = V(10, 10, 0), c = V(0, 10, 0), material = "m" },
+        { a = V(10, 10, 0), b = V(20, 10, 0), c = V(20, 20, 0), material = "m" }, -- touches the first square at one corner
+        { a = V(10, 10, 0), b = V(20, 20, 0), c = V(10, 20, 0), material = "m" },
+        { a = V(50, 0, 0), b = V(60, 0, 0), c = V(60, 10, 0), material = "other" }
+    } }
+    local pieces = PCF.MaterialPieces(mesh, "m")
+    check(#pieces == 2 and #pieces[1] == 2 and #pieces[2] == 2, "two squares, two pieces")
+end)
+
 step("an entity: local coordinates follow its angles", function()
     local ent = M.MakeEntity("prop_physics", V(0, 0, 0), A(0, 90, 0), { model = "models/props/screen.mdl", GetSkin = function() return 0 end })
     local face = M.Rect(V(0, 10, 0), V(0, 1, 0), V(1, 0, 0), V(0, 0, 1), 20, 10)
@@ -281,27 +411,6 @@ end)
 --------------------------------------------------------------------------------
 -- STM test interface (server)
 --------------------------------------------------------------------------------
-
--- A fake STM: windows are recorded; button_matrix windows take rows of buttons.
-local function FakeSTM(windows)
-    return { LCARS = {
-        Interfaces = { base = { Close = function() end } },
-        CreateWindow = function(self, kind, pos, ang, scale, width, height, callback, title)
-            local w = { kind = kind, pos = pos, ang = ang, scale = scale, width = width, height = height, title = title, rows = {} }
-            function w:CreateMainButtonRow(rowHeight) local row = { height = rowHeight, buttons = {} } table.insert(self.rows, row) return row end
-            function w:AddButtonToRow(row, name, number, color, active, disabled, toggle, cb)
-                local button = { name = name, callback = cb }
-                table.insert(row.buttons, button)
-                return button
-            end
-            table.insert(windows, w)
-            return true, w
-        end,
-        OpenInterface = function(self, ply, ent, name, ...)
-            return setmetatable({}, { __index = self.Interfaces[name] }):Open(ent, ...)
-        end
-    } }
-end
 
 step("STM test interface: one window over the whole surface", function()
     M.scene = { M.CylinderStrip(V(0, 0, 0), V(0, 0, 1), V(1, 0, 0), 100, -40, 40, -20, 20) }

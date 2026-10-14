@@ -10,18 +10,85 @@ local function Ang(a) return "Angle(" .. N(a.p) .. ", " .. N(a.y) .. ", " .. N(a
 PCF.FormatVector, PCF.FormatAngle = Vec, Ang
 
 -- The result as a Lua table: world coordinates, and the target's own
--- coordinates ("Local") when it's a prop or entity.
+-- coordinates ("Local") when it's a prop or entity. A material in several
+-- separate pieces gets a Pieces list, left to right, each with everything
+-- needed to build an interface on it.
 function PCF.FormatResult(result)
     local t = result.target
-    local L = result.ToLocal
     local out = {}
     local function line(depth, text) table.insert(out, string.rep("    ", depth) .. text) end
-    local function pair(depth, key, world, localValue)
-        if localValue then
-            line(depth, key .. " = { World = " .. world .. ", Local = " .. localValue .. " },")
-        else
-            line(depth, key .. " = " .. world .. ",")
+
+    -- One surface's measurements, at `depth`.
+    local function Body(r, depth)
+        local L = r.ToLocal
+        local function pair(d, key, world, localValue)
+            if localValue then
+                line(d, key .. " = { World = " .. world .. ", Local = " .. localValue .. " },")
+            else
+                line(d, key .. " = " .. world .. ",")
+            end
         end
+        if r.aimed ~= false then
+            line(depth, "Hit = {")
+            pair(depth + 1, "Pos", Vec(r.hit.pos), L and Vec(L(r.hit.pos)))
+            pair(depth + 1, "Normal", Vec(r.hit.normal), L and Vec(r.ToLocalDir(r.hit.normal)))
+            line(depth, "},")
+        end
+        line(depth, "Shape = \"" .. r.shape .. "\", -- fit error " .. N(r.residual or 0) .. " units (rms)")
+        if r.radius then line(depth, "Radius = " .. N(r.radius) .. ",") end
+        if r.concave ~= nil then line(depth, "Concave = " .. tostring(r.concave) .. ", -- curves towards you") end
+        if r.center then pair(depth, "Center", Vec(r.center), L and Vec(L(r.center))) end
+        if r.axis then pair(depth, "Axis", Vec(r.axis), L and Vec(r.ToLocalDir(r.axis))) end
+        if r.arcDegrees then line(depth, "ArcDegrees = " .. N(r.arcDegrees) .. ",") end
+        line(depth, "Width = " .. N(r.width) .. ", -- along the surface")
+        line(depth, "Height = " .. N(r.height) .. ",")
+
+        local frame = r.frame
+        line(depth, "Screen = { -- the middle of the surface, facing out")
+        pair(depth + 1, "Pos", Vec(frame.pos), L and Vec(L(frame.pos)))
+        pair(depth + 1, "Ang", Ang(frame.ang), L and Ang(r.ToLocalAng({ right = frame.up:Cross(frame.normal):GetNormalized(), normal = frame.normal })))
+        line(depth, "},")
+
+        -- The exact surface (see sh_curve.lua): u runs left to right, v top to bottom.
+        local c = r.curve
+        if c then
+            line(depth, "Curve = {")
+            if c.flat then
+                line(depth + 1, "Flat = true, Width = " .. N(c.width) .. ", Height = " .. N(c.height) .. ",")
+                pair(depth + 1, "Center", Vec(c.center), L and Vec(L(c.center)))
+                for _, key in ipairs({ "normal", "right", "up" }) do
+                    pair(depth + 1, key:sub(1, 1):upper() .. key:sub(2), Vec(c[key]), L and Vec(r.ToLocalDir(c[key])))
+                end
+            else
+                line(depth + 1, "Radius = " .. N(c.radius) .. ", Concave = " .. tostring(c.concave) .. ",")
+                line(depth + 1, "TMin = " .. N(c.tMin) .. ", TMax = " .. N(c.tMax) .. ", -- radians round the axis, from E1 towards E2")
+                line(depth + 1, "HMin = " .. N(c.hMin) .. ", HMax = " .. N(c.hMax) .. ", -- along the axis, from Center")
+                pair(depth + 1, "Center", Vec(c.center), L and Vec(L(c.center)))
+                for _, key in ipairs({ "axis", "e1", "e2" }) do
+                    pair(depth + 1, key:sub(1, 1):upper() .. key:sub(2), Vec(c[key]), L and Vec(r.ToLocalDir(c[key])))
+                end
+            end
+            line(depth, "},")
+        end
+
+        line(depth, "Edges = { -- why each direction stopped")
+        for _, side in ipairs({ "left", "right", "up", "down" }) do
+            line(depth + 1, side:sub(1, 1):upper() .. side:sub(2) .. " = \"" .. r.edges[side] .. "\",")
+        end
+        line(depth, "},")
+
+        line(depth, "-- Flat pieces following the surface, for cam.Start3D2D(TopLeft, Ang, scale)")
+        line(depth, "-- (Pos is each piece's middle).")
+        line(depth, "Segments = {")
+        for _, seg in ipairs(r.segments) do
+            line(depth + 1, "{")
+            pair(depth + 2, "Pos", Vec(seg.pos), L and Vec(L(seg.pos)))
+            pair(depth + 2, "TopLeft", Vec(seg.topLeft), L and Vec(L(seg.topLeft)))
+            pair(depth + 2, "Ang", Ang(seg.ang), L and Ang(r.ToLocalAng(seg)))
+            line(depth + 2, "Width = " .. N(seg.width) .. ", Height = " .. N(seg.height) .. ",")
+            line(depth + 1, "},")
+        end
+        line(depth, "},")
     end
 
     line(0, "-- PropCurveFinder")
@@ -36,49 +103,26 @@ function PCF.FormatResult(result)
     if t.ang then line(2, "Ang = " .. Ang(t.ang) .. ",") end
     line(1, "},")
 
-    line(1, "Hit = {")
-    pair(2, "Pos", Vec(result.hit.pos), L and Vec(L(result.hit.pos)))
-    pair(2, "Normal", Vec(result.hit.normal), L and Vec(result.ToLocalDir(result.hit.normal)))
-    line(1, "},")
-
     if result.source == "model" then
         line(1, "Material = \"" .. result.material .. "\", -- measured from the model's own triangles")
     elseif result.meshNote then
         line(1, "-- Measured with traces (" .. result.meshNote .. ").")
     end
-    line(1, "Shape = \"" .. result.shape .. "\", -- fit error " .. N(result.residual or 0) .. " units (rms)")
-    if result.radius then line(1, "Radius = " .. N(result.radius) .. ",") end
-    if result.concave ~= nil then line(1, "Concave = " .. tostring(result.concave) .. ", -- curves towards you") end
-    if result.center then pair(1, "Center", Vec(result.center), L and Vec(L(result.center))) end
-    if result.axis then pair(1, "Axis", Vec(result.axis), L and Vec(result.ToLocalDir(result.axis))) end
-    if result.arcDegrees then line(1, "ArcDegrees = " .. N(result.arcDegrees) .. ",") end
-    line(1, "Width = " .. N(result.width) .. ", -- along the surface")
-    line(1, "Height = " .. N(result.height) .. ",")
 
-    local frame = result.frame
-    line(1, "Screen = { -- the middle of the surface, facing out")
-    pair(2, "Pos", Vec(frame.pos), L and Vec(L(frame.pos)))
-    pair(2, "Ang", Ang(frame.ang), L and Ang(result.ToLocalAng({ right = frame.up:Cross(frame.normal):GetNormalized(), normal = frame.normal })))
-    line(1, "},")
-
-    line(1, "Edges = { -- why each direction stopped")
-    for _, side in ipairs({ "left", "right", "up", "down" }) do
-        line(2, side:sub(1, 1):upper() .. side:sub(2) .. " = \"" .. result.edges[side] .. "\",")
+    local pieces = result.pieces
+    if pieces and #pieces > 1 then
+        line(1, "-- " .. #pieces .. " separate pieces of the material, left to right as you looked at them.")
+        line(1, "Aimed = " .. result.index .. ", -- the one you aimed at (or nearest)")
+        line(1, "Pieces = {")
+        for i, piece in ipairs(pieces) do
+            line(2, "{ -- piece " .. i)
+            Body(piece, 3)
+            line(2, "},")
+        end
+        line(1, "},")
+    else
+        Body(result, 1)
     end
-    line(1, "},")
-
-    line(1, "-- Flat pieces following the surface, for cam.Start3D2D(TopLeft, Ang, scale)")
-    line(1, "-- (Pos is each piece's middle).")
-    line(1, "Segments = {")
-    for _, seg in ipairs(result.segments) do
-        line(2, "{")
-        pair(3, "Pos", Vec(seg.pos), L and Vec(L(seg.pos)))
-        pair(3, "TopLeft", Vec(seg.topLeft), L and Vec(L(seg.topLeft)))
-        pair(3, "Ang", Ang(seg.ang), L and Ang(result.ToLocalAng(seg)))
-        line(3, "Width = " .. N(seg.width) .. ", Height = " .. N(seg.height) .. ",")
-        line(2, "},")
-    end
-    line(1, "},")
     line(0, "}")
     return table.concat(out, "\n")
 end
@@ -93,11 +137,7 @@ local function Corners(seg)
 end
 PCF.SegmentCorners = Corners
 
-hook.Add("PostDrawTranslucentRenderables", "PropCurveFinder.Overlay", function(depth, skybox)
-    local result = PCF.Last
-    if depth or skybox or not result then return end
-
-    render.SetColorMaterial()
+local function DrawResult(result)
     for i, tri in ipairs(result.triangles or {}) do
         if i > 4000 then break end
         for k = 1, 3 do render.DrawLine(tri[k], tri[k % 3 + 1], Color(0, 200, 255), false) end
@@ -117,6 +157,13 @@ hook.Add("PostDrawTranslucentRenderables", "PropCurveFinder.Overlay", function(d
         local c = Corners(seg)
         for i = 1, 4 do render.DrawLine(c[i], c[i % 4 + 1], Color(80, 255, 120), false) end
     end
+end
+
+hook.Add("PostDrawTranslucentRenderables", "PropCurveFinder.Overlay", function(depth, skybox)
+    local result = PCF.Last
+    if depth or skybox or not result then return end
+    render.SetColorMaterial()
+    for _, piece in ipairs(result.pieces or { result }) do DrawResult(piece) end
 end)
 
 --------------------------------------------------------------------------------
@@ -129,7 +176,8 @@ function PCF.ShowResult(result)
     local text = PCF.FormatResult(result)
 
     frame = vgui.Create("DFrame")
-    frame:SetTitle("PropCurveFinder: " .. result.shape .. (result.radius and string.format(", radius %.1f", result.radius) or ""))
+    local count = result.pieces and #result.pieces or 1
+    frame:SetTitle("PropCurveFinder: " .. (count > 1 and (count .. " pieces, ") or "") .. result.shape .. (result.radius and string.format(", radius %.1f", result.radius) or ""))
     frame:SetSize(math.min(ScrW() - 40, 760), math.min(ScrH() - 40, 640))
     frame:Center()
     frame:MakePopup()
@@ -158,7 +206,7 @@ function PCF.ShowResult(result)
     interface:Dock(LEFT)
     interface:DockMargin(6, 0, 0, 0)
     interface:SetWide(200)
-    interface:SetText("Make STM test interface")
+    interface:SetText(count > 1 and ("Make " .. count .. " STM test interfaces") or "Make STM test interface")
     interface:SetEnabled(Star_Trek ~= nil and Star_Trek.LCARS ~= nil)
     interface.DoClick = function()
         PCF.RequestTestInterface(result)
@@ -170,22 +218,25 @@ end
 -- Network
 --------------------------------------------------------------------------------
 
--- Asks the server for an STM test interface covering the whole surface.
+-- Asks the server for STM test interfaces: one covering each piece.
 function PCF.RequestTestInterface(result)
-    local curve = result.curve
-    if not curve then return end
-    -- A little in front of the surface, so it doesn't flicker into it.
+    local pieces = result.pieces or { result }
     local lift = PCF.Setting("lift", 0.25)
-    local lifted = {}
-    for k, v in pairs(curve) do lifted[k] = v end
-    if curve.flat then
-        lifted.center = curve.center + curve.normal * lift
-    else
-        lifted.radius = curve.radius + (curve.concave and -lift or lift)
-    end
     net.Start("PropCurveFinder.TestInterface")
     net.WriteEntity(result.target.type == "entity" and result.target.ent or NULL)
-    PCF.Curve.Write(lifted)
+    net.WriteUInt(math.min(#pieces, 15), 4)
+    for i = 1, math.min(#pieces, 15) do
+        local curve = pieces[i].curve
+        -- A little in front of the surface, so it doesn't flicker into it.
+        local lifted = {}
+        for k, v in pairs(curve) do lifted[k] = v end
+        if curve.flat then
+            lifted.center = curve.center + curve.normal * lift
+        else
+            lifted.radius = curve.radius + (curve.concave and -lift or lift)
+        end
+        PCF.Curve.Write(lifted)
+    end
     net.SendToServer()
 end
 
@@ -223,6 +274,26 @@ end
 concommand.Add("propcurvefinder", function() PCF.ProbeLook() end, nil, "Probe the surface you're looking at")
 concommand.Add("propcurvefinder_clear", function() PCF.Clear() end, nil, "Clear the probe and your test interface")
 concommand.Add("propcurvefinder_show", function() PCF.Reopen() end, nil, "Show the last result again")
+-- The static prop under the crosshair: where it is, printed and copied.
+function PCF.StaticPropInfo()
+    local tr = LocalPlayer():GetEyeTrace()
+    local prop = tr.Hit and PCF.FindStaticProp(tr.HitPos)
+    if not prop then
+        print("[PropCurveFinder] No static prop under the crosshair" .. (tr.HitTexture == "**studio**" and " found in the map's list." or "."))
+        return nil
+    end
+    local bounds = PCF.ModelBounds(prop.model)
+    local text = string.format('{ Model = "%s", Index = %d, Skin = %d, Pos = %s, Ang = %s%s }',
+        prop.model, prop.index, prop.skin or 0, Vec(prop.pos), Ang(prop.ang),
+        bounds and (", Mins = " .. Vec(bounds.mins) .. ", Maxs = " .. Vec(bounds.maxs)) or "")
+    print("[PropCurveFinder] " .. text)
+    SetClipboardText(text)
+    return prop, text
+end
+
+concommand.Add("propcurvefinder_staticprop", function() PCF.StaticPropInfo() end, nil,
+    "Print (and copy) the position and angles of the static prop you're looking at")
+
 concommand.Add("propcurvefinder_materials", function()
     local ply = LocalPlayer()
     local target = PCF.IdentifyTarget(ply:GetEyeTrace())

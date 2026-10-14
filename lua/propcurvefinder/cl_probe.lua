@@ -117,8 +117,8 @@ end
 
 -- On a prop or entity: its real surface, from the model's own triangles (a
 -- trace only hits its collision model, which can sit in front of what you see).
--- The material is propcurvefinder_material, or the one under the crosshair; the
--- samples are every corner of that material's piece, with its normals.
+-- The material is propcurvefinder_material, or the one under the crosshair.
+-- Every separate piece of it is sampled: every corner, with its normal.
 -- Returns nil and a reason when it can't be done.
 function PCF.MeshSamples(target, tr)
     if not (target.model and target.pos and target.ang) then return nil end
@@ -136,81 +136,59 @@ function PCF.MeshSamples(target, tr)
     local material = SettingString("material")
     material = material ~= "" and PCF.NormalizePath(material) or (hitIndex and mesh.triangles[hitIndex].material)
     if not material then return nil, "the crosshair isn't on the model" end
-    local piece = PCF.MaterialPiece(mesh, material, hitIndex)
-    if #piece == 0 then return nil, "the model doesn't use " .. material end
+    local pieceLists = PCF.MaterialPieces(mesh, material)
+    if #pieceLists == 0 then return nil, "the model doesn't use " .. material end
 
-    local samples = { material = material, points = {}, normals = {}, triangles = {}, materials = PCF.ModelMaterials(mesh) }
-    if hitIndex and mesh.triangles[hitIndex].material == material then
-        local tri = mesh.triangles[hitIndex]
-        samples.hitPos = ToWorld(localOrigin + localDir * hitT)
-        samples.hitNormal = ToWorldDir((tri.b - tri.a):Cross(tri.c - tri.a))
-    end
-
-    local seen = {}
-    for _, i in ipairs(piece) do
-        local tri = mesh.triangles[i]
-        local corners = {}
-        for _, corner in ipairs({ { tri.a, tri.na }, { tri.b, tri.nb }, { tri.c, tri.nc } }) do
-            local world = ToWorld(corner[1])
-            corners[#corners + 1] = world
-            local key = string.format("%.2f %.2f %.2f", world.x, world.y, world.z)
-            if not seen[key] then
-                seen[key] = true
-                table.insert(samples.points, world)
-                table.insert(samples.normals, ToWorldDir(corner[2]))
+    local samples = { material = material, materials = PCF.ModelMaterials(mesh), pieces = {} }
+    for _, list in ipairs(pieceLists) do
+        local piece = { points = {}, normals = {}, triangles = {} }
+        local seen, aimed = {}, false
+        for _, i in ipairs(list) do
+            if i == hitIndex then aimed = true end
+            local tri = mesh.triangles[i]
+            local corners = {}
+            for _, corner in ipairs({ { tri.a, tri.na }, { tri.b, tri.nb }, { tri.c, tri.nc } }) do
+                local world = ToWorld(corner[1])
+                corners[#corners + 1] = world
+                local key = string.format("%.2f %.2f %.2f", world.x, world.y, world.z)
+                if not seen[key] then
+                    seen[key] = true
+                    table.insert(piece.points, world)
+                    table.insert(piece.normals, ToWorldDir(corner[2]))
+                end
             end
+            table.insert(piece.triangles, corners)
         end
-        table.insert(samples.triangles, corners)
-    end
 
-    if not samples.hitPos then
-        -- Aimed elsewhere: start from the corner of the piece nearest the crosshair.
-        local best
-        for k, p in ipairs(samples.points) do
-            if not best or p:DistToSqr(tr.HitPos) < samples.points[best]:DistToSqr(tr.HitPos) then best = k end
+        if aimed then
+            -- The exact spot you aimed at.
+            local tri = mesh.triangles[hitIndex]
+            piece.aimed = true
+            piece.hitPos = ToWorld(localOrigin + localDir * hitT)
+            piece.hitNormal = ToWorldDir((tri.b - tri.a):Cross(tri.c - tri.a))
+        else
+            -- The corner nearest the piece's middle.
+            local middle = PCF.Math.Centroid(piece.points)
+            local best = 1
+            for k, p in ipairs(piece.points) do
+                if p:DistToSqr(middle) < piece.points[best]:DistToSqr(middle) then best = k end
+            end
+            piece.hitPos, piece.hitNormal = piece.points[best], piece.normals[best]
         end
-        samples.hitPos, samples.hitNormal = samples.points[best], samples.normals[best]
-    end
-    -- Normals facing you.
-    if samples.hitNormal:Dot(origin - samples.hitPos) < 0 then samples.hitNormal = -samples.hitNormal end
-    for k, n in ipairs(samples.normals) do
-        if n:Dot(samples.hitNormal) < 0 then samples.normals[k] = -n end
+        -- Normals facing you.
+        if piece.hitNormal:Dot(origin - piece.hitPos) < 0 then piece.hitNormal = -piece.hitNormal end
+        for k, n in ipairs(piece.normals) do
+            if n:Dot(piece.hitNormal) < 0 then piece.normals[k] = -n end
+        end
+        table.insert(samples.pieces, piece)
     end
     return samples
 end
 
--- Probes the surface a trace hit. Returns a result table (see README).
-function PCF.Probe(tr, eyeForward)
-    local target = PCF.IdentifyTarget(tr)
-    local p0, n0 = tr.HitPos, tr.HitNormal
-
-    local result = { target = target, hit = { pos = p0, normal = n0, texture = tr.HitTexture }, edges = {}, paths = {} }
-    local points, normals
-    local samples, why = PCF.MeshSamples(target, tr)
-    if samples then
-        -- Measured from the model's own triangles.
-        p0, n0 = samples.hitPos, samples.hitNormal
-        result.hit.pos, result.hit.normal = p0, n0
-        result.material, result.materials, result.triangles = samples.material, samples.materials, samples.triangles
-        result.source = "model"
-        points, normals = samples.points, samples.normals
-        for _, side in ipairs({ "left", "right", "up", "down" }) do result.edges[side] = "the edge of the material" end
-    else
-        -- Measured by walking along the surface with traces.
-        result.source = "traces"
-        result.meshNote = why
-        local up0, right0 = HitBasis(n0, eyeForward)
-        points, normals = { p0 }, { n0 }
-        for name, dir in pairs({ right = right0, left = -right0, up = up0, down = -up0 }) do
-            local path, reason = PCF.March(target, p0, n0, dir)
-            result.paths[name] = path
-            result.edges[name] = reason
-            for _, sample in ipairs(path) do
-                table.insert(points, sample.pos)
-                table.insert(normals, sample.normal)
-            end
-        end
-    end
+-- Fits a shape to the samples and lays the surface out: shape, curve, size,
+-- frame and flat pieces for cam.Start3D2D. p0/n0: a point on it and its
+-- normal (facing the viewer); points are all the samples.
+local function Measure(result, points, normals, p0, n0, eyeForward)
     local up0 = HitBasis(n0, eyeForward)
     result.points = points
 
@@ -225,7 +203,7 @@ function PCF.Probe(tr, eyeForward)
 
     if fit.shape == "cylinder" then
         local A, C, r = fit.axis, fit.center, fit.radius
-        -- Angles around the axis, 0 at the hit, increasing to the right.
+        -- Angles around the axis, 0 at p0, increasing to the right.
         local radial0 = p0 - C
         local e1 = Unit(radial0 - A * radial0:Dot(A))
         local e2 = Unit(A:Cross(e1))
@@ -273,7 +251,7 @@ function PCF.Probe(tr, eyeForward)
             table.insert(segments, { pos = pos, normal = N, right = Unit(A:Cross(N)), up = A, width = width, height = height })
         end
     else
-        -- Flat (or a sphere, laid out on the plane touching it at the hit).
+        -- Flat (or a sphere, laid out on the plane touching it at p0).
         local N = fit.shape == "flat" and fit.normal or n0
         local up = Unit(up0 - N * up0:Dot(N))
         local right = Unit(up:Cross(N))
@@ -300,14 +278,76 @@ function PCF.Probe(tr, eyeForward)
     end
     result.segments = segments
     result.frame.ang = Unit(result.frame.up:Cross(result.frame.normal)):AngleEx(result.frame.normal)
+end
 
-    -- Everything again in the target's own coordinates (props and entities).
-    if target.pos and target.ang then
-        result.ToLocal = function(pos) return (WorldToLocal(pos, Angle(0, 0, 0), target.pos, target.ang)) end
-        result.ToLocalDir = function(dir) return (WorldToLocal(dir, Angle(0, 0, 0), Vector(0, 0, 0), target.ang)) end
-        result.ToLocalAng = function(seg)
-            return result.ToLocalDir(seg.right):AngleEx(result.ToLocalDir(seg.normal))
+-- Coordinates in the target's own space (props and entities).
+local function AddLocal(result, target)
+    if not (target.pos and target.ang) then return end
+    result.ToLocal = function(pos) return (WorldToLocal(pos, Angle(0, 0, 0), target.pos, target.ang)) end
+    result.ToLocalDir = function(dir) return (WorldToLocal(dir, Angle(0, 0, 0), Vector(0, 0, 0), target.ang)) end
+    result.ToLocalAng = function(seg)
+        return result.ToLocalDir(seg.right):AngleEx(result.ToLocalDir(seg.normal))
+    end
+end
+
+-- Probes the surface a trace hit. Returns a result table (see README); on a
+-- prop whose material comes in several separate pieces, result.pieces has a
+-- result for each, left to right, and the result itself is the one you aimed
+-- at (or the nearest).
+function PCF.Probe(tr, eyeForward)
+    local target = PCF.IdentifyTarget(tr)
+    local p0, n0 = tr.HitPos, tr.HitNormal
+
+    local samples, why = PCF.MeshSamples(target, tr)
+    if samples then
+        -- Measured from the model's own triangles, piece by piece.
+        local pieces = {}
+        for _, piece in ipairs(samples.pieces) do
+            local result = {
+                target = target, source = "model", material = samples.material, materials = samples.materials,
+                hit = { pos = piece.hitPos, normal = piece.hitNormal, texture = tr.HitTexture },
+                triangles = piece.triangles, paths = {}, edges = {}, aimed = piece.aimed
+            }
+            for _, side in ipairs({ "left", "right", "up", "down" }) do result.edges[side] = "the edge of the material" end
+            Measure(result, piece.points, piece.normals, piece.hitPos, piece.hitNormal, eyeForward)
+            AddLocal(result, target)
+            table.insert(pieces, result)
+        end
+
+        -- Left to right as you look at them.
+        local right = Unit(eyeForward:Cross(Vector(0, 0, 1)))
+        if right:Length() < 0.5 then right = Unit(eyeForward:Cross(Vector(1, 0, 0))) end
+        table.sort(pieces, function(a, b) return a.frame.pos:Dot(right) < b.frame.pos:Dot(right) end)
+
+        local main
+        for i, piece in ipairs(pieces) do
+            piece.index = i
+            if piece.aimed then main = piece end
+        end
+        if not main then
+            for _, piece in ipairs(pieces) do
+                if not main or piece.frame.pos:DistToSqr(tr.HitPos) < main.frame.pos:DistToSqr(tr.HitPos) then main = piece end
+            end
+        end
+        main.pieces = pieces
+        return main
+    end
+
+    -- Measured by walking along the surface with traces.
+    local result = { target = target, source = "traces", meshNote = why,
+        hit = { pos = p0, normal = n0, texture = tr.HitTexture }, edges = {}, paths = {} }
+    local up0, right0 = HitBasis(n0, eyeForward)
+    local points, normals = { p0 }, { n0 }
+    for name, dir in pairs({ right = right0, left = -right0, up = up0, down = -up0 }) do
+        local path, reason = PCF.March(target, p0, n0, dir)
+        result.paths[name] = path
+        result.edges[name] = reason
+        for _, sample in ipairs(path) do
+            table.insert(points, sample.pos)
+            table.insert(normals, sample.normal)
         end
     end
+    Measure(result, points, normals, p0, n0, eyeForward)
+    AddLocal(result, target)
     return result
 end

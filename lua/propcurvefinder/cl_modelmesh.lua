@@ -238,36 +238,57 @@ function PCF.RayMesh(mesh, origin, dir)
     return best, bestT
 end
 
--- The triangles of `material` connected (by shared corners) to triangle
--- `start`, or all of them if start isn't one of that material.
-function PCF.MaterialPiece(mesh, material, start)
+-- Every separate piece of `material`: lists of triangle indices, largest
+-- first. Triangles are in the same piece when they share an edge (two
+-- corners), so panels that only touch at a corner, or have a gap between
+-- them, are separate. Slivers under 1% of the largest piece's area are dropped.
+function PCF.MaterialPieces(mesh, material)
     local function Key(v) return string.format("%.2f %.2f %.2f", v.x, v.y, v.z) end
-    local selected, byCorner = {}, {}
+    local function EdgeKey(a, b)
+        local ka, kb = Key(a), Key(b)
+        if ka > kb then ka, kb = kb, ka end
+        return ka .. "|" .. kb
+    end
+    local byEdge, members = {}, {}
     for i, tri in ipairs(mesh.triangles) do
         if tri.material == material then
-            selected[#selected + 1] = i
-            for _, v in ipairs({ tri.a, tri.b, tri.c }) do
-                local k = Key(v)
-                byCorner[k] = byCorner[k] or {}
-                table.insert(byCorner[k], i)
+            members[#members + 1] = i
+            for _, edge in ipairs({ { tri.a, tri.b }, { tri.b, tri.c }, { tri.c, tri.a } }) do
+                local k = EdgeKey(edge[1], edge[2])
+                byEdge[k] = byEdge[k] or {}
+                table.insert(byEdge[k], i)
             end
         end
     end
-    if not (start and mesh.triangles[start] and mesh.triangles[start].material == material) then return selected end
 
-    local piece, seen, queue = {}, { [start] = true }, { start }
-    while #queue > 0 do
-        local i = table.remove(queue)
-        piece[#piece + 1] = i
-        local tri = mesh.triangles[i]
-        for _, v in ipairs({ tri.a, tri.b, tri.c }) do
-            for _, j in ipairs(byCorner[Key(v)]) do
-                if not seen[j] then seen[j] = true queue[#queue + 1] = j end
+    local pieceOf, pieces = {}, {}
+    for _, start in ipairs(members) do
+        if not pieceOf[start] then
+            local piece = { triangles = {}, area = 0 }
+            pieceOf[start] = piece
+            local queue = { start }
+            while #queue > 0 do
+                local i = table.remove(queue)
+                local tri = mesh.triangles[i]
+                table.insert(piece.triangles, i)
+                piece.area = piece.area + (tri.b - tri.a):Cross(tri.c - tri.a):Length() / 2
+                for _, edge in ipairs({ { tri.a, tri.b }, { tri.b, tri.c }, { tri.c, tri.a } }) do
+                    for _, j in ipairs(byEdge[EdgeKey(edge[1], edge[2])]) do
+                        if not pieceOf[j] then pieceOf[j] = piece queue[#queue + 1] = j end
+                    end
+                end
             end
+            table.sort(piece.triangles)
+            pieces[#pieces + 1] = piece
         end
     end
-    table.sort(piece)
-    return piece
+    table.sort(pieces, function(a, b) return a.area > b.area end)
+
+    local result = {}
+    for _, piece in ipairs(pieces) do
+        if piece.area >= (pieces[1].area * 0.01) then result[#result + 1] = piece.triangles end
+    end
+    return result
 end
 
 -- The materials a model uses (for listing what you can pick).

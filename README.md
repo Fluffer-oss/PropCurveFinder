@@ -27,6 +27,7 @@ Put the repository in `garrysmod/addons/` so the path is `garrysmod/addons/propc
 | `propcurvefinder_clear` | Secondary fire | Clear the probe, and your test interface. |
 | `propcurvefinder_show` | Reload | Show the last result again. |
 | `propcurvefinder_materials` | | List the materials of the prop you're looking at. |
+| `propcurvefinder_staticprop` | | Print (and copy) the static prop you're looking at: model, index, skin, position, angles and bounding box. |
 | `propcurvefinder_material <path>` | | Measure that material on props, e.g. `propcurvefinder_material models/kingpommes/startrek/intrepid/lcars/lcars_bridge_mission_middle`. Empty (`propcurvefinder_material ""`) measures the material you're looking at. |
 
 ### Props: measured from the model itself
@@ -40,6 +41,12 @@ Then it measures with the real triangles:
 1. Your aim is cast against the triangles, to find exactly which surface and material you're looking at, even behind glass.
 2. It takes that material (or the one named in `propcurvefinder_material`), only the piece connected to where you aimed.
 3. The curve is fitted to every corner of that piece with its own normals, so the radius, arc, width, height and edges are the material's exactly.
+
+**Materials in separate pieces.** A material can come in several separate pieces, like a lower console panel split into three screens. Triangles are in the same piece only when they share an edge, so pieces with a gap between them, or touching at just a corner, are separate. Slivers under 1% of the biggest piece are ignored. Then:
+- each piece is measured on its own;
+- the export has a `Pieces = { ... }` list, left to right as you looked at them, with `Aimed` saying which one you aimed at;
+- each piece has its shape, size, `Screen` position and angles, `Curve` (the exact surface: radius, angle and height ranges, center and axes, in the world and the prop's own coordinates) and segments;
+- **Make STM test interfaces** places one separate interface on each piece. Presses say which interface, row and column.
 
 The result says `Material = "..."` when it was measured this way, and the piece's triangles are drawn in light blue. If the model's files can't be read, or it doesn't use the material you named, it falls back to walking the surface with traces and says why.
 
@@ -139,7 +146,9 @@ They check, against the true geometry:
 - that every piece sits on or in front of the surface and faces you, in order left to right;
 - the 3D2D angle conventions;
 - static prop and entity local coordinates;
-- props measured from real binary model files (`.mdl`, `.vvd` with fixups, `.vtx`): a curved console screen behind a collision sheet of glass, measured exactly, by the material you look at or name, only the connected piece;
+- props measured from real binary model files (`.mdl`, `.vvd` with fixups, `.vtx`): a curved console screen behind a collision sheet of glass, measured exactly, by the material you look at or name;
+- a material in three separate pieces (and a sliver): each measured, ordered left to right, exported (valid Lua that reads back) and given its own interface; panels touching only at a corner kept apart;
+- the static prop command;
 - the STM interface: one window over the whole curve at the right size and place, its buttons, the curve sent to every client (late joiners too), admin-only, replacing and clearing;
 - drawing it round the curve (every corner on the curve showing the right part of the window) and mapping your aim to the exact pixel for hover and presses, through STM's hooks;
 - the console commands and the weapon.
