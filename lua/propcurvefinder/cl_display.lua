@@ -170,17 +170,22 @@ end
 -- Network
 --------------------------------------------------------------------------------
 
--- Asks the server for an STM interface with one window on each segment.
+-- Asks the server for an STM test interface covering the whole surface.
 function PCF.RequestTestInterface(result)
+    local curve = result.curve
+    if not curve then return end
+    -- A little in front of the surface, so it doesn't flicker into it.
+    local lift = PCF.Setting("lift", 0.25)
+    local lifted = {}
+    for k, v in pairs(curve) do lifted[k] = v end
+    if curve.flat then
+        lifted.center = curve.center + curve.normal * lift
+    else
+        lifted.radius = curve.radius + (curve.concave and -lift or lift)
+    end
     net.Start("PropCurveFinder.TestInterface")
     net.WriteEntity(result.target.type == "entity" and result.target.ent or NULL)
-    net.WriteUInt(#result.segments, 7)
-    for _, seg in ipairs(result.segments) do
-        net.WriteVector(seg.pos)
-        net.WriteAngle(seg.ang)
-        net.WriteFloat(seg.width)
-        net.WriteFloat(seg.height)
-    end
+    PCF.Curve.Write(lifted)
     net.SendToServer()
 end
 

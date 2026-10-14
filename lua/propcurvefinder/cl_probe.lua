@@ -253,6 +253,9 @@ function PCF.Probe(tr, eyeForward)
         result.height = height
         local tMid = (tMin + tMax) / 2
         result.frame = { pos = C + Radial(tMid) * r + A * hMid, normal = Normal(tMid), up = A }
+        -- The exact surface, for drawing one window wrapped round it.
+        result.curve = { center = C, axis = A, e1 = e1, e2 = e2, radius = r, concave = fit.concave,
+            tMin = tMin, tMax = tMax, hMin = hMin, hMax = hMax }
 
         local delta = (tMax - tMin) / segmentCount
         for i = 1, segmentCount do
@@ -283,6 +286,7 @@ function PCF.Probe(tr, eyeForward)
         local center = p0 + right * ((uMin + uMax) / 2) + up * ((vMin + vMax) / 2)
         result.width, result.height = uMax - uMin, vMax - vMin
         result.frame = { pos = center, normal = N, up = up }
+        result.curve = { flat = true, center = center, normal = N, right = right, up = up, width = result.width, height = result.height }
         if fit.shape == "sphere" then
             result.radius, result.concave, result.center = fit.radius, fit.concave, fit.center
         end

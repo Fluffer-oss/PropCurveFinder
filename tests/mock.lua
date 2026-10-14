@@ -168,8 +168,12 @@ M.existingMaterials = {}
 M.convars = {}
 M.time = 100
 
+local nextIndex = 0
 function M.MakeEntity(class, pos, ang, extra)
-    local e = { __valid = true, class = class, pos = pos, ang = ang or Angle(0, 0, 0), sounds = {} }
+    nextIndex = nextIndex + 1
+    local e = { __valid = true, class = class, pos = pos, ang = ang or Angle(0, 0, 0), sounds = {}, index = nextIndex }
+    function e:EntIndex() return self.index end
+    function e:Alive() return true end
     function e:GetClass() return self.class end
     function e:GetModel() return self.model end
     function e:GetPos() return self.pos end
@@ -240,6 +244,23 @@ function M.NewRealm(isServer, localPlayer)
         return env.GetConVar(name)
     end
     env.LocalPlayer = function() return localPlayer end
+    env.KEY_E, env.MOUSE_LEFT, env.MOUSE_RIGHT = 15, 107, 108
+    -- Where the player aims: M.aim (a unit Vector).
+    env.input = { GetCursorPos = function() return 960, 540 end }
+    env.gui = { ScreenToVector = function() return M.aim end }
+    env.MATERIAL_QUADS = 4
+    env.CreateMaterial = function(name, shader, params) return { name = name, shader = shader, params = params } end
+    env.render = { SetMaterial = function(m) env.drawMaterial = m end }
+    env.drawn = {}
+    local building
+    env.mesh = {
+        Begin = function(kind, count) building = { kind = kind, count = count, verts = {} } end,
+        Position = function(p) building.current = { pos = p } end,
+        TexCoord = function(_, u, v) building.current.u, building.current.v = u, v end,
+        Color = function(r, g, b, a) building.current.alpha = a end,
+        AdvanceVertex = function() table.insert(building.verts, building.current) end,
+        End = function() table.insert(env.drawn, building) building = nil end
+    }
     env.Material = function(name)
         return { IsError = function() return not M.existingMaterials[name] end }
     end
@@ -273,14 +294,20 @@ function M.NewRealm(isServer, localPlayer)
     local hooks = {}
     env.hook = {
         Add = function(e, n, f) hooks[e] = hooks[e] or {} hooks[e][n] = f end,
-        Run = function(e, ...) for _, f in pairs(hooks[e] or {}) do f(...) end end
+        Run = function(e, ...)
+            for _, f in pairs(hooks[e] or {}) do
+                local a, b = f(...)
+                if a ~= nil then return a, b end
+            end
+        end,
+        Remove = function(e, n) if hooks[e] then hooks[e][n] = nil end end
     }
 
     -- net: messages are lists of typed fields.
     local out, inc
     local receivers = {}
     env.net = { Receive = function(n, f) receivers[n] = f end, Start = function(n) out = { name = n, fields = {} } end }
-    for _, kind in ipairs({ "Entity", "UInt", "Vector", "Angle", "Float" }) do
+    for _, kind in ipairs({ "Entity", "UInt", "Int", "Bool", "Vector", "Angle", "Float" }) do
         env.net["Write" .. kind] = function(v) table.insert(out.fields, { kind, v }) end
         env.net["Read" .. kind] = function()
             local f = table.remove(inc.fields, 1)
@@ -290,6 +317,10 @@ function M.NewRealm(isServer, localPlayer)
     end
     env.net.SendToServer = function() table.insert(NetQueue, { msg = out, sender = localPlayer, toServer = true }) end
     env.net.Send = function(ply) table.insert(NetQueue, { msg = out, target = ply }) end
+    env.net.Broadcast = function() table.insert(NetQueue, { msg = out }) end
+    env.sent = {}
+    local start = env.net.Start
+    env.net.Start = function(n) start(n) table.insert(env.sent, out) end
     env.receivers = receivers
     env.__deliver = function(msg, sender)
         inc = { name = msg.name, fields = { unpack(msg.fields) } }

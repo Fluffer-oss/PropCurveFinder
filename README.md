@@ -107,16 +107,22 @@ It's also shown in a window as a Lua table you can copy, and printed to the cons
 
 ## STM test interface
 
-**Make STM test interface** in the result window puts a Star Trek Modules LCARS interface on the surface:
-- one window on each piece, each full of numbered test buttons (`S3 B2` is piece 3, button 2);
-- pressing one beeps and tells you in chat which piece and button you pressed.
+**Make STM test interface** in the result window puts one Star Trek Modules LCARS interface over the whole surface, wrapped round the curve:
+- it's a single STM `button_matrix` window, as wide as the surface (along the curve) and as tall, full of test buttons (`R2 C3` is row 2, column 3);
+- pressing one beeps and tells you in chat which row and column you pressed.
 
-If the windows sit flush on the screen and every press registers on the button you aimed at, the curve is right.
+If the window sits flush on the screen from edge to edge, and every press registers on the button you aimed at (including at the far left and right of a curve), the curve is right.
 
-How it works:
+How it's drawn on a curve, without changing STM:
+- STM windows are flat. Each one draws its picture into a render target, then puts that on a flat panel.
+- For this interface, that render target is drawn round the measured curve instead, in 48 thin strips, so each part of the window sits on the surface.
+- Where your aim meets the curve (exactly, not via a flat approximation) becomes the window's mouse position. Hover and presses land where things are drawn, through STM's own `Get3D2DMousePos`, `PreventRender` and `PreventButton` hooks.
+- Presses are sent to STM's server like any other LCARS press, within STM's usual reach of 80 units.
+
+Where it lives:
 - STM interfaces belong to an entity, so it's held by an invisible anchor entity. If you probed a prop or entity, the anchor is parented to it, so it moves with it.
-- It's a normal STM interface class (`propcurvefinder_test`, built on STM's `base`).
-- Its windows are STM `button_list` windows. Their scale is raised if needed so a small screen still fits STM's frame.
+- It sits `propcurvefinder_lift` (0.25 units) in front of the surface.
+- Every client gets the curve, late joiners included.
 - It stays open until you clear it (`propcurvefinder_clear` or the weapon's secondary fire), place another, or leave.
 
 Only admins can place one, unless the server sets `propcurvefinder_interface_adminonly 0`.
@@ -134,7 +140,8 @@ They check, against the true geometry:
 - the 3D2D angle conventions;
 - static prop and entity local coordinates;
 - props measured from real binary model files (`.mdl`, `.vvd` with fixups, `.vtx`): a curved console screen behind a collision sheet of glass, measured exactly, by the material you look at or name, only the connected piece;
-- the STM interface: windows on their pieces at the right size, button presses, admin-only, replacing and clearing;
+- the STM interface: one window over the whole curve at the right size and place, its buttons, the curve sent to every client (late joiners too), admin-only, replacing and clearing;
+- drawing it round the curve (every corner on the curve showing the right part of the window) and mapping your aim to the exact pixel for hover and presses, through STM's hooks;
 - the console commands and the weapon.
 
 ```

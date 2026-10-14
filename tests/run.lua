@@ -24,6 +24,7 @@ local admin = M.MakeEntity("player", V(0, 0, 0), nil, { admin = true })
 -- Where the player is looking, for the console command and the weapon.
 admin.eye, admin.look = V(0, 0, 0), V(1, 0, 0)
 function admin:EyeAngles() return self.look:AngleEx(V(0, 0, 1)) end
+function admin:EyePos() return self.eye end
 function admin:GetEyeTrace() return M.Trace({ start = self.eye, endpos = self.eye + self.look * 4096, filter = self }) end
 local client = M.NewRealm(false, admin)
 client.include("autorun/propcurvefinder.lua")
@@ -281,38 +282,41 @@ end)
 -- STM test interface (server)
 --------------------------------------------------------------------------------
 
-step("STM test interface: one window on each piece", function()
-    M.scene = { M.CylinderStrip(V(0, 0, 0), V(0, 0, 1), V(1, 0, 0), 100, -40, 40, -20, 20) }
-    local result = ProbeAt(V(0, 0, 0), V(100, 10, 3))
-
-    local server = M.NewRealm(true)
-    local created = {}
-    local windows = {}
-    server.ents = { Create = function(class)
-        local e = M.MakeEntity(class, V(0, 0, 0))
-        table.insert(created, e)
-        return e
-    end }
-    server.Star_Trek = { LCARS = {
+-- A fake STM: windows are recorded; button_matrix windows take rows of buttons.
+local function FakeSTM(windows)
+    return { LCARS = {
         Interfaces = { base = { Close = function() end } },
-        CreateWindow = function(self, kind, pos, ang, scale, width, height, callback, buttons, title)
-            local w = { kind = kind, pos = pos, ang = ang, scale = scale, width = width, height = height, callback = callback, buttons = buttons, title = title }
+        CreateWindow = function(self, kind, pos, ang, scale, width, height, callback, title)
+            local w = { kind = kind, pos = pos, ang = ang, scale = scale, width = width, height = height, title = title, rows = {} }
+            function w:CreateMainButtonRow(rowHeight) local row = { height = rowHeight, buttons = {} } table.insert(self.rows, row) return row end
+            function w:AddButtonToRow(row, name, number, color, active, disabled, toggle, cb)
+                local button = { name = name, callback = cb }
+                table.insert(row.buttons, button)
+                return button
+            end
             table.insert(windows, w)
             return true, w
         end,
         OpenInterface = function(self, ply, ent, name, ...)
-            local interface = setmetatable({}, { __index = self.Interfaces[name] })
-            local ok, list = interface:Open(ent, ...)
-            self.opened = { ok = ok, windows = list, ent = ent }
-            return ok, list
+            return setmetatable({}, { __index = self.Interfaces[name] }):Open(ent, ...)
         end
     } }
+end
+
+step("STM test interface: one window over the whole surface", function()
+    M.scene = { M.CylinderStrip(V(0, 0, 0), V(0, 0, 1), V(1, 0, 0), 100, -40, 40, -20, 20) }
+    local result = ProbeAt(V(0, 0, 0), V(100, 10, 3))
+    check(result.curve and not result.curve.flat and near(result.curve.radius, 100, 0.05), "the probe keeps the exact curve")
+
+    local server = M.NewRealm(true)
+    local created, windows = {}, {}
+    server.ents = { Create = function(class) local e = M.MakeEntity(class, V(0, 0, 0)) table.insert(created, e) return e end }
+    server.Star_Trek = FakeSTM(windows)
     server.include("autorun/propcurvefinder.lua")
     client.Star_Trek = { LCARS = {} }
 
-    local crew = M.MakeEntity("player", V(0, 0, 0), nil, { admin = false })
-    M.netQueue[#M.netQueue + 1] = nil
     -- A non-admin is refused.
+    local crew = M.MakeEntity("player", V(0, 0, 0), nil, { admin = false })
     local crewClient = M.NewRealm(false, crew)
     crewClient.include("autorun/propcurvefinder.lua")
     crewClient.PropCurveFinder.RequestTestInterface(result)
@@ -321,41 +325,143 @@ step("STM test interface: one window on each piece", function()
 
     PCF.RequestTestInterface(result)
     M.Pump(server, client)
-    check(#windows == 8, "8 windows: " .. #windows)
+    check(#windows == 1, "one window: " .. #windows)
+    local w = windows[1]
     local anchor = created[1]
     check(anchor and anchor.class == "propcurvefinder_anchor" and anchor.spawned, "an anchor entity holds it")
     check(anchor.LCARSKeyData and anchor.LCARSKeyData.lcars_never_close, "and keeps it open")
-    for i, w in ipairs(windows) do
-        local seg = result.segments[i]
-        local pos, ang = M.LocalToWorld(w.pos, w.ang, anchor.pos, anchor.ang)
-        check(vnear(pos, seg.pos, 1e-3) and vnear(ang:Up(), seg.normal, 1e-6) and vnear(ang:Forward(), seg.right, 1e-6), "window " .. i .. " on its piece")
-        check(near(w.width / w.scale, seg.width, 1e-6) and near(w.height / w.scale, seg.height, 1e-6), "window " .. i .. " the piece's size")
-        check(w.width >= 180 - 1e-6 and w.height >= 160 - 1e-6, "window " .. i .. " big enough for STM's frame")
-        check(w.kind == "button_list" and #w.buttons >= 1, "window " .. i .. " has test buttons")
-    end
-    windows[3].callback(nil, nil, admin, 2)
-    check(admin.chat[#admin.chat]:find("segment 3 of 8, button 2", 1, true), "pressing a button says which: " .. tostring(admin.chat[#admin.chat]))
-    check(anchor.sounds[1] == "star_trek.lcars_beep", "and beeps")
 
-    -- Placing another replaces the first; the tool's clear removes it.
-    PCF.RequestTestInterface(result)
+    -- The window, lifted 0.25 in front of the curve, covers all of it.
+    local lifted = 100 - 0.25
+    local width, height = lifted * (result.curve.tMax - result.curve.tMin), result.curve.hMax - result.curve.hMin
+    check(w.kind == "button_matrix", "an STM button matrix")
+    check(near(w.width / w.scale, width, 0.1) and near(w.height / w.scale, height, 0.1), "as wide as the curve (" .. w.width / w.scale .. " of " .. width .. ") and as tall")
+    check(w.width == math.floor(w.width) and w.height >= 300, "whole pixels, enough for STM's frame")
+    local pos, ang = M.LocalToWorld(w.pos, w.ang, anchor.pos, anchor.ang)
+    local mu, mv = PCF.Curve.Hit(result.curve, V(0, 0, 0), pos:GetNormalized())
+    check(near(math.sqrt(pos.x ^ 2 + pos.y ^ 2), lifted, 1e-3) and near(mu, 0.5, 1e-6) and near(mv, 0.5, 1e-6),
+        "STM's own placement: the middle of the curve (" .. tostring(mu) .. ", " .. tostring(mv) .. ")")
+    check(ang:Up():Dot(V(0, 0, 0) - pos) > 0 and near(ang:Up().z, 0, 1e-6), "facing the viewer")
+
+    local rows, cols = #w.rows, #w.rows[1].buttons
+    check(rows >= 2 and cols >= 3, "a grid of test buttons: " .. rows .. " x " .. cols)
+    w.rows[2].buttons[3].callback(admin)
+    check(admin.chat[#admin.chat]:find("row 2, column 3", 1, true), "pressing one says which: " .. tostring(admin.chat[#admin.chat]))
+
+    -- Every client gets the curve, in the anchor's coordinates.
+    local curve = PCF.Curved[anchor:EntIndex()]
+    check(curve and near(curve.radius, lifted, 1e-3), "the client has the curve")
+    local world = PCF.Curve.ToWorld(curve, anchor.pos, anchor.ang)
+    check(vnear(world.center, result.curve.center, 1e-3), "back in the world, the same curve")
+
+    -- A late joiner asks for it.
+    local late = M.MakeEntity("player", V(0, 0, 0), nil, { admin = false })
+    local lateClient = M.NewRealm(false, late)
+    lateClient.include("autorun/propcurvefinder.lua")
+    lateClient.hook.Run("InitPostEntity")
+    M.Pump(server, lateClient)
+    check(lateClient.PropCurveFinder.Curved[anchor:EntIndex()] ~= nil, "late joiners get it")
+
+    -- Placing another replaces the first; clearing removes it.
     M.time = M.time + 2
     PCF.RequestTestInterface(result)
     M.Pump(server, client)
     check(not anchor.__valid and created[2] and created[2].__valid, "a new one replaces the old")
     server.PropCurveFinder.ClearTestInterface(admin)
-    check(not created[2].__valid, "cleared")
+    check(not created[2].__valid and next(server.PropCurveFinder.CurvedAnchors) == nil, "cleared")
 
-    -- A small screen still gets windows big enough for STM's frame.
-    M.scene = { M.Rect(V(0, 0, 0), V(-1, 0, 0), V(0, 1, 0), V(0, 0, 1), 3, 2) }
-    local small = ProbeAt(V(-20, 0, 0), V(0, 0, 0))
-    windows = {}
-    M.time = M.time + 2
-    PCF.RequestTestInterface(small)
-    M.Pump(server, client)
-    check(#windows == 1 and windows[1].width >= 180 - 1e-6 and windows[1].height >= 160 - 1e-6,
-        "6 x 4 screen: window " .. tostring(windows[1] and windows[1].width) .. " x " .. tostring(windows[1] and windows[1].height) .. " pixels")
-    check(near(windows[1].width / windows[1].scale, small.segments[1].width, 1e-6), "still exactly the screen's size")
+    PCF.TestServer, PCF.TestWindow, PCF.TestResult = server, w, result
+end)
+
+step("the window drawn round the curve, and your aim mapped onto it", function()
+    local Curve = PCF.Curve
+    M.scene = { M.CylinderStrip(V(0, 0, 0), V(0, 0, 1), V(1, 0, 0), 100, -40, 40, -20, 20) }
+    local result = ProbeAt(V(0, 0, 0), V(100, 10, 3))
+    local curve = result.curve
+
+    -- Points and hits agree everywhere.
+    local worst = 0
+    for _, uv in ipairs({ { 0, 0 }, { 1, 1 }, { 0.25, 0.75 }, { 0.5, 0.5 }, { 0.9, 0.1 } }) do
+        local p = Curve.Point(curve, uv[1], uv[2])
+        local u, v = Curve.Hit(curve, V(0, 0, 0), p:GetNormalized())
+        worst = math.max(worst, math.abs(u - uv[1]), math.abs(v - uv[2]))
+    end
+    check(worst < 1e-6, "aiming at a point of the curve gives back its place: " .. worst)
+    check(Curve.Hit(curve, V(0, 0, 0), V(0, 1, 0)) == nil, "aiming off the curve: nothing")
+    local left, right = Curve.Point(curve, 0, 0.5), Curve.Point(curve, 1, 0.5)
+    check((right - left):Dot(A(0, 0, 0):Right()) > 0, "u runs left to right as you look at it")
+    check(Curve.Point(curve, 0.5, 0).z > Curve.Point(curve, 0.5, 1).z, "v runs top to bottom")
+
+    -- An STM interface on an anchor, with one window.
+    local anchor = M.MakeEntity("propcurvefinder_anchor", V(50, 0, 0))
+    PCF.Curved[anchor:EntIndex()] = Curve.ToLocal(curve, anchor.pos, anchor.ang)
+    local pressed = {}
+    local window = { WWidth = 1400, WHeight = 400, RT = { GetName = function() return "LCARS_W_1" end } }
+    function window:OnPress(pixel, animPos) table.insert(pressed, pixel) return 7 end
+    local interface = { Ent = anchor, IVis = true, AnimPos = 1, Windows = { window } }
+    window.Interface = interface
+    local stmPresses, rtDraws = 0, 0
+    client.Star_Trek = { LCARS = {
+        ActiveInterfaces = { [anchor:EntIndex()] = interface },
+        PlayerButtonDown = function() stmPresses = stmPresses + 1 end,
+        RTDrawWindow = function(_, w) if w == window then rtDraws = rtDraws + 1 end end
+    } }
+
+    -- STM's hooks: its drawing and its button handling skip ours; its updates don't.
+    check(client.hook.Run("Star_Trek.LCARS.PreventRender", interface) == true, "STM doesn't draw it flat")
+    check(client.hook.Run("Star_Trek.LCARS.PreventRender", interface, true) == nil, "but still updates it")
+    check(client.hook.Run("Star_Trek.LCARS.PreventButton", interface) == true, "and leaves its buttons to us")
+    check(client.hook.Run("Star_Trek.LCARS.PreventRender", { Ent = M.MakeEntity("prop", V(0, 0, 0)) }) == nil, "other interfaces untouched")
+
+    -- Hover: the pixel under your aim.
+    M.aim = Curve.Point(curve, 0.25, 0.75):GetNormalized()
+    admin.eye = V(0, 0, 0)
+    local pixel = client.hook.Run("Star_Trek.LCARS.Get3D2DMousePos", window, V(0, 0, 0))
+    check(pixel and near(pixel.x, 350, 1e-3) and near(pixel.y, 300, 1e-3), "hovering: pixel " .. tostring(pixel and pixel.x) .. ", " .. tostring(pixel and pixel.y))
+    M.aim = V(0, 1, 0)
+    pixel = client.hook.Run("Star_Trek.LCARS.Get3D2DMousePos", window, V(0, 0, 0))
+    check(pixel and pixel.x < 0, "aiming away: off the window")
+
+    -- Pressing: through STM's own entry point, which ours wraps.
+    client.hook.Run("Think")
+    admin.eye = V(40, 0, 0) -- within STM's reach of 80
+    M.aim = (Curve.Point(curve, 0.6, 0.2) - admin.eye):GetNormalized()
+    client.sent = {}
+    client.Star_Trek.LCARS:PlayerButtonDown(admin, client.MOUSE_LEFT)
+    check(stmPresses == 1, "STM's own handling still runs (for its other interfaces)")
+    check(#pressed == 1 and near(pressed[1].x, 0.6 * 1400, 1e-3) and near(pressed[1].y, 0.2 * 400, 1e-3), "the press lands on the pixel you aimed at")
+    local msg = client.sent[#client.sent]
+    check(msg and msg.name == "Star_Trek.LCARS.Pressed" and msg.fields[1][2] == anchor:EntIndex() and msg.fields[2][2] == 1 and msg.fields[3][2] == 7,
+        "and is sent to STM's server like any press")
+
+    M.aim = (Curve.Point(curve, 0.6, 0.2) - admin.eye):GetNormalized()
+    client.Star_Trek.LCARS:PlayerButtonDown(admin, 42) -- some other key
+    check(#pressed == 1, "only E and mouse buttons press")
+    admin.eye = V(-200, 0, 0) -- too far
+    M.aim = (Curve.Point(curve, 0.5, 0.5) - V(-200, 0, 0)):GetNormalized()
+    client.Star_Trek.LCARS:PlayerButtonDown(admin, client.MOUSE_LEFT)
+    check(#pressed == 1, "too far away: no press")
+    admin.eye = V(0, 0, 0)
+
+    -- Drawing: STM fills the render target, then it's wrapped round the curve.
+    client.drawn = {}
+    client.hook.Run("PostDrawTranslucentRenderables", false, false)
+    check(rtDraws == 1, "STM draws the window's contents")
+    local drawn = client.drawn[1]
+    check(drawn and drawn.count == 48 and #drawn.verts == 48 * 4, "in 48 strips")
+    local onCurve, mapped = true, true
+    for _, vert in ipairs(drawn and drawn.verts or {}) do
+        local localPos = vert.pos - V(0, 0, 0)
+        if not near(math.sqrt(localPos.x ^ 2 + localPos.y ^ 2), 100, 0.1) then onCurve = false end
+        local u, v = Curve.Hit(curve, V(0, 0, 0), vert.pos:GetNormalized())
+        if not (u and near(u, vert.u, 1e-6) and near(v, vert.v, 1e-6)) then mapped = false end
+    end
+    check(onCurve, "every corner on the curve")
+    check(mapped, "every corner shows the part of the window your aim maps there")
+
+    PCF.Curved[anchor:EntIndex()] = nil
+    client.Star_Trek = nil
+    for i = #M.netQueue, 1, -1 do M.netQueue[i] = nil end -- the press went to STM, not here
 end)
 
 step("console commands: probe, show, clear", function()
@@ -384,13 +490,7 @@ step("the weapon: primary probes, secondary clears", function()
     local server = M.NewRealm(true)
     local created = {}
     server.ents = { Create = function(class) local e = M.MakeEntity(class, V(0, 0, 0)) table.insert(created, e) return e end }
-    server.Star_Trek = { LCARS = {
-        Interfaces = { base = {} },
-        CreateWindow = function(_, ...) return true, {} end,
-        OpenInterface = function(self, ply, ent, name, ...)
-            return setmetatable({}, { __index = self.Interfaces[name] }):Open(ent, ...)
-        end
-    } }
+    server.Star_Trek = FakeSTM({})
     server.include("autorun/propcurvefinder.lua")
     server.SWEP = {}
     server.include("weapons/weapon_propcurvefinder.lua")
