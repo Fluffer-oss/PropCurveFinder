@@ -20,6 +20,10 @@ M.convars = {
 }
 
 local admin = M.MakeEntity("player", V(0, 0, 0), nil, { admin = true })
+-- Where the player is looking, for the console command and the weapon.
+admin.eye, admin.look = V(0, 0, 0), V(1, 0, 0)
+function admin:EyeAngles() return self.look:AngleEx(V(0, 0, 1)) end
+function admin:GetEyeTrace() return M.Trace({ start = self.eye, endpos = self.eye + self.look * 4096, filter = self }) end
 local client = M.NewRealm(false, admin)
 client.include("autorun/propcurvefinder.lua")
 local PCF = client.PropCurveFinder
@@ -272,6 +276,71 @@ step("STM test interface: one window on each piece", function()
     check(#windows == 1 and windows[1].width >= 180 - 1e-6 and windows[1].height >= 160 - 1e-6,
         "6 x 4 screen: window " .. tostring(windows[1] and windows[1].width) .. " x " .. tostring(windows[1] and windows[1].height) .. " pixels")
     check(near(windows[1].width / windows[1].scale, small.segments[1].width, 1e-6), "still exactly the screen's size")
+end)
+
+step("console commands: probe, show, clear", function()
+    check(client.clientConVars.propcurvefinder_step == "2" and client.clientConVars.propcurvefinder_segments == "8", "settings are console variables")
+    check(client.printed:find("propcurvefinder", 1, true) ~= nil, "says it's loaded: " .. tostring(client.printed))
+
+    M.scene = { M.CylinderStrip(V(0, 0, 0), V(0, 0, 1), V(1, 0, 0), 100, -40, 40, -20, 20) }
+    admin.eye, admin.look = V(0, 0, 0), V(1, 0.1, 0.03):GetNormalized()
+    PCF.Last = nil
+    client.panels = {}
+    client.commands.propcurvefinder()
+    check(PCF.Last and PCF.Last.shape == "cylinder" and near(PCF.Last.radius, 100, 0.05), "'propcurvefinder' probes what you're looking at")
+    check(client.panels[1] and client.panels[1].class == "DFrame", "and shows the result window")
+    check(client.lastPrint:find("Shape = \"cylinder\"", 1, true) ~= nil, "and prints it to the console")
+
+    client.panels = {}
+    client.commands.propcurvefinder_show()
+    check(client.panels[1] and client.panels[1].class == "DFrame", "'propcurvefinder_show' shows it again")
+
+    admin.look = V(0, 0, -1) -- at nothing
+    client.commands.propcurvefinder()
+    check(client.notified and client.notified:find("nothing there", 1, true), "looking at nothing says so")
+end)
+
+step("the weapon: primary probes, secondary clears", function()
+    local server = M.NewRealm(true)
+    local created = {}
+    server.ents = { Create = function(class) local e = M.MakeEntity(class, V(0, 0, 0)) table.insert(created, e) return e end }
+    server.Star_Trek = { LCARS = {
+        Interfaces = { base = {} },
+        CreateWindow = function(_, ...) return true, {} end,
+        OpenInterface = function(self, ply, ent, name, ...)
+            return setmetatable({}, { __index = self.Interfaces[name] }):Open(ent, ...)
+        end
+    } }
+    server.include("autorun/propcurvefinder.lua")
+    server.SWEP = {}
+    server.include("weapons/weapon_propcurvefinder.lua")
+    local SWEP = server.SWEP
+    check(SWEP.Spawnable and SWEP.PrintName == "Prop Curve Finder", "spawnable weapon")
+    local weapon = setmetatable({ GetOwner = function() return admin end, SetNextPrimaryFire = function() end,
+        SetNextSecondaryFire = function() end, EmitSound = function() end }, { __index = SWEP })
+
+    M.scene = { M.Rect(V(50, 0, 0), V(-1, 0, 0), V(0, 1, 0), V(0, 0, 1), 10, 5) }
+    admin.eye, admin.look = V(0, 0, 0), V(1, 0, 0)
+    PCF.Last = nil
+    weapon:PrimaryAttack()
+    M.Pump(server, client)
+    check(PCF.Last and PCF.Last.shape == "flat" and near(PCF.Last.width, 20, 2.1), "primary probes on the owner's game")
+
+    PCF.RequestTestInterface(PCF.Last)
+    M.Pump(server, client)
+    check(created[1] and created[1].__valid, "a test interface placed")
+    weapon:SecondaryAttack()
+    M.Pump(server, client)
+    check(PCF.Last == nil and not created[1].__valid, "secondary clears the probe and the interface")
+
+    -- The console clear does the same through the server.
+    M.time = M.time + 2
+    PCF.Last = PCF.Probe(admin:GetEyeTrace(), admin.look)
+    PCF.RequestTestInterface(PCF.Last)
+    M.Pump(server, client)
+    client.commands.propcurvefinder_clear()
+    M.Pump(server, client)
+    check(PCF.Last == nil and created[2] and not created[2].__valid, "'propcurvefinder_clear' clears both")
 end)
 
 print(string.format("\n%d passed, %d failed", passed, failed))

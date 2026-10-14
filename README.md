@@ -1,6 +1,6 @@
 # Prop Curve Finder
 
-A Garry's Mod tool gun mode for measuring a surface. Click a screen, a wall or a prop, and it tells you:
+A Garry's Mod tool for measuring a surface, as a console command or a weapon. Click a screen, a wall or a prop, and it tells you:
 - what you hit;
 - where it is, in the world and in the prop's own coordinates;
 - what shape it is (flat, curved or domed): its radius, axis, centre, arc and which way it curves;
@@ -9,7 +9,7 @@ A Garry's Mod tool gun mode for measuring a surface. Click a screen, a wall or a
 
 It can also put a test Star Trek Modules LCARS interface on it, to check the curve.
 
-Find it in the spawn menu under **Construction → Prop Curve Finder**, or type `gmod_tool propcurvefinder` in the console.
+Look at a surface and run `propcurvefinder` in the console (bind it to a key: `bind f6 propcurvefinder`), or use the **Prop Curve Finder** weapon (spawn menu, Weapons, Prop Curve Finder). It doesn't depend on any gamemode, and it works in singleplayer and on servers.
 
 ## Installing
 
@@ -17,14 +17,15 @@ Put the repository in `garrysmod/addons/` so the path is `garrysmod/addons/propc
 - **Lowercase folder name:** on a Linux server, GMod requires addon folder names to be all lowercase, so name it `propcurvefinder`, not `PropCurveFinder`. Clone it with `git clone https://github.com/Fluffer-oss/PropCurveFinder propcurvefinder`.
 - **Downloaded as a zip:** make sure you don't end up with a folder inside a folder (`addons/PropCurveFinder-main/PropCurveFinder-main/lua`).
 - **Check it's loaded:** the console prints `[PropCurveFinder] loaded (server)` and `[PropCurveFinder] loaded (client)`.
+- **Client-only use:** the console command needs only the client part, so it also works when you're just a player on a server that has the addon. The test interface needs the server part.
 
 ## Using it
 
-| | |
-|---|---|
-| **Left click** | Probe the surface. |
-| **Right click** | Clear the probe, and your test interface. |
-| **Reload** | Show the last result again. |
+| Console | Weapon | |
+|---|---|---|
+| `propcurvefinder` | Primary fire | Probe the surface you're looking at. |
+| `propcurvefinder_clear` | Secondary fire | Clear the probe, and your test interface. |
+| `propcurvefinder_show` | Reload | Show the last result again. |
 
 A probe:
 1. **Finds what you hit.**
@@ -78,14 +79,14 @@ It's also shown in a window as a Lua table you can copy, and printed to the cons
 
 `Local` values are in the prop's own space (for props, static props and entities), so they stay right if the prop moves. Draw a piece with `cam.Start3D2D(TopLeft, Ang, 1 / pixelsPerUnit)`: x runs across the piece and y down it.
 
-### Settings (tool panel)
+### Settings (console variables, saved)
 
-- **Sample spacing:** distance between samples on the walk (2 units). Smaller is more precise on tight curves.
-- **Max distance:** how far to walk in each direction (512).
-- **Edge bend:** a sharper bend than this is an edge (30°).
-- **Pieces:** how many flat pieces a curved surface is split into (8).
-- **Lift:** how far in front of the surface the pieces sit (0.25 units), so they don't flicker into it.
-- **Stop at texture changes:** for world brushes (on).
+- `propcurvefinder_step 2`: distance between samples on the walk. Smaller is more precise on tight curves.
+- `propcurvefinder_maxdistance 512`: how far to walk in each direction.
+- `propcurvefinder_maxbend 30`: a sharper bend than this (degrees) is an edge.
+- `propcurvefinder_segments 8`: how many flat pieces a curved surface is split into.
+- `propcurvefinder_lift 0.25`: how far in front of the surface the pieces sit, so they don't flicker into it.
+- `propcurvefinder_texturestop 1`: on world brushes, stop at a texture change.
 
 ## STM test interface
 
@@ -99,7 +100,7 @@ How it works:
 - STM interfaces belong to an entity, so it's held by an invisible anchor entity. If you probed a prop or entity, the anchor is parented to it, so it moves with it.
 - It's a normal STM interface class (`propcurvefinder_test`, built on STM's `base`).
 - Its windows are STM `button_list` windows. Their scale is raised if needed so a small screen still fits STM's frame.
-- It stays open until you right click, place another, or leave.
+- It stays open until you clear it (`propcurvefinder_clear` or the weapon's secondary fire), place another, or leave.
 
 Only admins can place one, unless the server sets `propcurvefinder_interface_adminonly 0`.
 
@@ -115,7 +116,8 @@ They check, against the true geometry:
 - that every piece sits on or in front of the surface and faces you, in order left to right;
 - the 3D2D angle conventions;
 - static prop and entity local coordinates;
-- the STM interface: windows on their pieces at the right size, button presses, admin-only, replacing and clearing.
+- the STM interface: windows on their pieces at the right size, button presses, admin-only, replacing and clearing;
+- the console commands and the weapon.
 
 ```
 lua5.1 tests/run.lua

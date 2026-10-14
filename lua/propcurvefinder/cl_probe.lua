@@ -6,6 +6,19 @@ local Mth = PCF.Math
 -- (walking along it until it ends), what shape it is, and a layout of flat
 -- segments that follow it, ready for cam.Start3D2D or STM windows.
 
+-- Settings, as console variables (saved between sessions).
+local DEFAULTS = {
+    step = { "2", "Distance between samples when walking along the surface" },
+    maxdistance = { "512", "How far to walk along the surface in each direction" },
+    maxbend = { "30", "A sharper bend than this (degrees) is an edge" },
+    segments = { "8", "Flat pieces to split a curved surface into" },
+    texturestop = { "1", "On world brushes, a different texture is an edge" },
+    lift = { "0.25", "How far in front of the surface the pieces sit" }
+}
+for name, def in pairs(DEFAULTS) do
+    CreateClientConVar("propcurvefinder_" .. name, def[1], true, false, def[2])
+end
+
 local function Setting(name, default)
     local cvar = GetConVar("propcurvefinder_" .. name)
     return cvar and cvar:GetFloat() or default

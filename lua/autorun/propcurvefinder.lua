@@ -18,4 +18,4 @@ else
 end
 
 -- So you can see in the console that the addon is installed and loaded.
-MsgN("[PropCurveFinder] loaded (" .. (SERVER and "server" or "client") .. "): tool gun > Construction > Prop Curve Finder, or 'gmod_tool propcurvefinder'")
+MsgN("[PropCurveFinder] loaded (" .. (SERVER and "server" or "client") .. "): console command 'propcurvefinder', or the Prop Curve Finder weapon")

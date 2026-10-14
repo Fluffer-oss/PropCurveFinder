@@ -233,6 +233,32 @@ function M.NewRealm(isServer, localPlayer)
         return env.GetConVar(name)
     end
     env.LocalPlayer = function() return localPlayer end
+    env.MsgN = function(...) env.printed = table.concat({ ... }) end
+    env.print = function(...) env.lastPrint = table.concat({ ... }, " ") end
+    env.commands = {}
+    env.concommand = { Add = function(name, fn) env.commands[name] = fn end }
+    env.CreateClientConVar = function(name, default)
+        assert(not isServer, "client convars are created on the client")
+        if M.convars[name] == nil then M.convars[name] = tonumber(default) end
+        env.clientConVars = env.clientConVars or {}
+        env.clientConVars[name] = default
+        return env.GetConVar(name)
+    end
+    env.notification = { AddLegacy = function(text) env.notified = text end }
+    env.ScrW, env.ScrH = function() return 1920 end, function() return 1080 end
+    env.SetClipboardText = function(text) env.clipboard = text end
+    -- Windows: every method is accepted and does nothing; created panels are recorded.
+    env.panels = {}
+    env.vgui = { Create = function(class)
+        local panel = { class = class, __valid = true }
+        setmetatable(panel, { __index = function(_, key)
+            if key == "Remove" then return function(self) self.__valid = false end end
+            if key == "Close" then return function(self) self.__valid = false end end
+            return function() end
+        end })
+        table.insert(env.panels, panel)
+        return panel
+    end }
 
     local hooks = {}
     env.hook = {
@@ -254,6 +280,7 @@ function M.NewRealm(isServer, localPlayer)
     end
     env.net.SendToServer = function() table.insert(NetQueue, { msg = out, sender = localPlayer, toServer = true }) end
     env.net.Send = function(ply) table.insert(NetQueue, { msg = out, target = ply }) end
+    env.receivers = receivers
     env.__deliver = function(msg, sender)
         inc = { name = msg.name, fields = { unpack(msg.fields) } }
         assert(receivers[msg.name], "no receiver for " .. msg.name)(0, sender)

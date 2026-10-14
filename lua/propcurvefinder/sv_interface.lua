@@ -5,6 +5,7 @@ util.AddNetworkString("PropCurveFinder.Probe")
 util.AddNetworkString("PropCurveFinder.Clear")
 util.AddNetworkString("PropCurveFinder.Reopen")
 util.AddNetworkString("PropCurveFinder.TestInterface")
+util.AddNetworkString("PropCurveFinder.ClearRequest")
 
 local adminOnly = CreateConVar("propcurvefinder_interface_adminonly", "1", FCVAR_ARCHIVE,
     "Only admins can place PropCurveFinder's STM test interfaces.")
@@ -106,3 +107,7 @@ function PCF.ClearTestInterface(ply)
 end
 
 hook.Add("PlayerDisconnected", "PropCurveFinder.Anchor", PCF.ClearTestInterface)
+
+net.Receive("PropCurveFinder.ClearRequest", function(_, ply)
+    if IsValid(ply) then PCF.ClearTestInterface(ply) end
+end)

@@ -175,8 +175,10 @@ function PCF.RequestTestInterface(result)
     net.SendToServer()
 end
 
-net.Receive("PropCurveFinder.Probe", function()
+-- Probes whatever you're looking at.
+function PCF.ProbeLook()
     local ply = LocalPlayer()
+    if not IsValid(ply) then return end
     local tr = ply:GetEyeTrace()
     if not tr.Hit or tr.HitSky then
         notification.AddLegacy("PropCurveFinder: nothing there", NOTIFY_ERROR, 3)
@@ -186,13 +188,29 @@ net.Receive("PropCurveFinder.Probe", function()
     PCF.Last = result
     print(PCF.FormatResult(result))
     PCF.ShowResult(result)
-end)
+    return result
+end
 
-net.Receive("PropCurveFinder.Clear", function()
+-- Clears the drawing, the window, and (on the server) your test interface.
+function PCF.Clear(fromServer)
     PCF.Last = nil
     if IsValid(frame) then frame:Remove() end
-end)
+    if not fromServer then
+        net.Start("PropCurveFinder.ClearRequest")
+        net.SendToServer()
+    end
+end
 
-net.Receive("PropCurveFinder.Reopen", function()
+function PCF.Reopen()
     if PCF.Last then PCF.ShowResult(PCF.Last) end
-end)
+end
+
+-- Console commands, bindable: bind f6 propcurvefinder
+concommand.Add("propcurvefinder", function() PCF.ProbeLook() end, nil, "Probe the surface you're looking at")
+concommand.Add("propcurvefinder_clear", function() PCF.Clear() end, nil, "Clear the probe and your test interface")
+concommand.Add("propcurvefinder_show", function() PCF.Reopen() end, nil, "Show the last result again")
+
+-- From the weapon (in singleplayer, weapons only run on the server).
+net.Receive("PropCurveFinder.Probe", function() PCF.ProbeLook() end)
+net.Receive("PropCurveFinder.Clear", function() PCF.Clear(true) end)
+net.Receive("PropCurveFinder.Reopen", function() PCF.Reopen() end)
